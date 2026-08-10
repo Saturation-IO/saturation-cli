@@ -32,4 +32,6 @@ jobs:
         run: cargo test --locked
 
       - name: Verify package
+        env:
+          CARGO_TARGET_DIR: /tmp/saturation-cli-package-target
         run: cargo publish --locked --dry-run
