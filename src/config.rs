@@ -1,27 +1,26 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
 const CONFIG_DIR: &str = ".saturation";
 const CONFIG_FILE: &str = "config.json";
-/// Default host for the agent registry and legacy desktop-token refresh.
-/// (`/api/cli/...`), which live on the internal web host.
-const DEFAULT_SERVER: &str = "https://next.saturation.io";
-/// Default host for the public `/v1` API. Distinct from `DEFAULT_SERVER`: the
-/// public surface is served from `next-api.saturation.io` (per the OpenAPI `servers`
-/// block and the TypeScript SDK), while auth + the agent registry stay on the
-/// internal host. An explicit `--server` / config / env override applies to both.
+/// Default host for the canonical public `/v1` API.
 const DEFAULT_V1_SERVER: &str = "https://next-api.saturation.io";
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Config {
     pub user: Option<UserInfo>,
-    pub active_workspace: Option<String>,
-    pub workspaces: HashMap<String, WorkspaceInfo>,
     pub token: Option<TokenInfo>,
-    pub server: Option<String>,
+    #[serde(default)]
+    pub oauth: Option<OAuthInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthInfo {
+    pub client_id: String,
+    pub token_endpoint: String,
+    pub resource: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,12 +28,6 @@ pub struct UserInfo {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceInfo {
-    pub name: String,
-    pub role: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,22 +96,16 @@ impl Config {
         Ok(())
     }
 
-    /// Host for auth + the agent registry (internal web host). An explicit
-    /// override (`--server` / config / env) wins for every namespace.
-    pub fn server_url(&self) -> &str {
-        self.server.as_deref().unwrap_or(DEFAULT_SERVER)
-    }
-
     /// Host for the public `/v1` API client. Falls back to the public API host
     /// (`next-api.saturation.io`), not the internal one, when no override is set.
     pub fn v1_server_url(&self) -> &str {
-        self.server.as_deref().unwrap_or(DEFAULT_V1_SERVER)
+        DEFAULT_V1_SERVER
     }
 
     pub fn require_token(&self) -> Result<&TokenInfo> {
         self.token
             .as_ref()
-            .context("Not authenticated. Run `saturation auth token TOKEN` first.")
+            .context("Not authenticated. Run `saturation login` first.")
     }
 }
 
@@ -161,8 +148,6 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert!(config.user.is_none());
-        assert!(config.active_workspace.is_none());
-        assert!(config.workspaces.is_empty());
         assert!(config.token.is_none());
     }
 
@@ -170,31 +155,21 @@ mod tests {
     fn test_roundtrip_config() {
         with_temp_config(|dir| {
             let path = dir.join("config.json");
-            let mut config = Config {
+            let config = Config {
                 user: Some(UserInfo {
                     id: "user-1".into(),
                     email: "test@example.com".into(),
                     name: Some("Test User".into()),
                 }),
-                active_workspace: Some("ws-abc".into()),
                 ..Config::default()
             };
-            config.workspaces.insert(
-                "ws-abc".into(),
-                WorkspaceInfo {
-                    name: "Test Studio".into(),
-                    role: "admin".into(),
-                },
-            );
 
             let contents = serde_json::to_string_pretty(&config).unwrap();
             std::fs::write(&path, &contents).unwrap();
 
             let loaded: Config =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            assert_eq!(loaded.active_workspace.as_deref(), Some("ws-abc"));
             assert_eq!(loaded.user.unwrap().email, "test@example.com");
-            assert_eq!(loaded.workspaces["ws-abc"].name, "Test Studio");
         });
     }
 
@@ -231,39 +206,9 @@ mod tests {
     }
 
     #[test]
-    fn test_server_url_default() {
-        let config = Config::default();
-        assert_eq!(config.server_url(), "https://next.saturation.io");
-    }
-
-    #[test]
-    fn test_server_url_override() {
-        let config = Config {
-            server: Some("http://localhost:4001".into()),
-            ..Default::default()
-        };
-        assert_eq!(config.server_url(), "http://localhost:4001");
-    }
-
-    #[test]
     fn test_v1_server_url_default_is_public_api_host() {
-        // The public /v1 client defaults to next-api.saturation.io, not the internal
-        // host that auth + the agent registry use.
         let config = Config::default();
         assert_eq!(config.v1_server_url(), "https://next-api.saturation.io");
-        assert_eq!(config.server_url(), "https://next.saturation.io");
-        assert_ne!(config.v1_server_url(), config.server_url());
-    }
-
-    #[test]
-    fn test_v1_server_url_honors_override() {
-        // An explicit override applies to both namespaces.
-        let config = Config {
-            server: Some("http://localhost:4300".into()),
-            ..Default::default()
-        };
-        assert_eq!(config.v1_server_url(), "http://localhost:4300");
-        assert_eq!(config.server_url(), "http://localhost:4300");
     }
 
     #[test]

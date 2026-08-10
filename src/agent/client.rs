@@ -1,228 +1,270 @@
-//! The agent-surface HTTP adapter.
-//!
-//! Targets `/api/cli/:ws/...` and speaks the internal `{ success, data, summary }`
-//! envelope (server `routes/cli/index.ts`). This is deliberately separate from
-//! the `/v1` [`crate::v1::Client`] so the two envelopes never bleed into each
-//! other: this adapter unwraps `{success,data}`; the `/v1` client keys off HTTP
-//! status with the §5d error model.
+//! OAuth-aware adapter for the public Saturation MCP endpoint.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
+const DEFAULT_MCP_RESOURCE: &str = "https://mcp.saturation.io/mcp";
+
 pub struct AgentClient {
     http: reqwest::Client,
-    base_url: String,
+    resource: String,
     token: String,
-    workspace_id: String,
+    workspace: Option<String>,
 }
 
-/// The internal agent envelope. `success:true` with `data`/`summary` on success;
-/// `success:false` with `error`/`message` on failure.
 #[derive(Debug, Deserialize)]
-struct AgentEnvelope {
-    #[serde(default)]
-    success: bool,
-    #[serde(default)]
-    data: Option<serde_json::Value>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
+struct RpcEnvelope<T> {
+    result: Option<T>,
+    error: Option<RpcError>,
 }
 
-/// The shape of `GET /tools`: `{ tools: [{ name, description }] }`.
 #[derive(Debug, Deserialize)]
-struct ToolsResponse {
+struct RpcError {
+    code: i64,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolsResult {
     tools: Vec<ToolInfo>,
 }
 
-#[derive(Debug, Deserialize, serde::Serialize)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitializeResult {
+    protocol_version: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
+    #[serde(default)]
+    pub input_schema: serde_json::Value,
 }
 
 impl AgentClient {
     pub fn from_config(config: &Config, workspace_override: Option<&str>) -> Result<Self> {
         let token = config.require_token()?;
-        let workspace_id = workspace_override
-            .map(|s| s.to_string())
-            .or_else(|| config.active_workspace.clone())
-            .context("no active agent workspace. Run `saturation workspace use <id>` first.")?;
         Ok(Self {
-            // Bound every request: a black-holed host must not hang the CLI
-            // indefinitely. (SAT-4696 review S1.)
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-            base_url: config.server_url().trim_end_matches('/').to_string(),
+                .context("failed to build the MCP client")?,
+            resource: config
+                .oauth
+                .as_ref()
+                .map(|oauth| oauth.resource.clone())
+                .unwrap_or_else(|| DEFAULT_MCP_RESOURCE.to_string()),
             token: token.access_token.clone(),
-            workspace_id,
+            workspace: workspace_override.map(String::from),
         })
     }
 
-    fn url(&self, suffix: &str) -> String {
-        format!(
-            "{}/api/cli/{}/{}",
-            self.base_url,
-            self.workspace_id,
-            suffix.trim_start_matches('/')
-        )
-    }
-
-    /// `GET /api/cli/:ws/tools` — registry discovery.
     pub async fn list_tools(&self) -> Result<Vec<ToolInfo>> {
-        let resp = self
-            .http
-            .get(self.url("tools"))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .context("request failed")?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("HTTP {status}: {body}");
-        }
-        let parsed: ToolsResponse = resp.json().await.context("failed to parse /tools")?;
-        Ok(parsed.tools)
+        let protocol = self.initialize().await?;
+        let result: ToolsResult = self
+            .rpc(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }),
+                Some(&protocol),
+            )
+            .await?;
+        Ok(result.tools)
     }
 
-    /// `POST /api/cli/:ws/tool/:toolName` — invoke a registered tool.
     pub async fn call_tool(
         &self,
         tool: &str,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let resp = self
-            .http
-            .post(self.url(&format!("tool/{tool}")))
-            .bearer_auth(&self.token)
-            .json(params)
-            .send()
-            .await
-            .context("request failed")?;
-        self.unwrap_envelope(resp).await
+        let protocol = self.initialize().await?;
+        self.rpc(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": { "name": tool, "arguments": params }
+            }),
+            Some(&protocol),
+        )
+        .await
     }
 
-    /// `POST /api/cli/:ws/upload` — multipart document upload.
-    pub async fn upload(
+    async fn initialize(&self) -> Result<String> {
+        let initialized: InitializeResult = self
+            .rpc(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "saturation-cli", "version": env!("CARGO_PKG_VERSION") }
+                }
+            }), None)
+            .await?;
+        self.notify_initialized(&initialized.protocol_version)
+            .await?;
+        Ok(initialized.protocol_version)
+    }
+
+    async fn notify_initialized(&self, protocol: &str) -> Result<()> {
+        let response = self
+            .request(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized"
+                }),
+                Some(protocol),
+            )
+            .send()
+            .await
+            .context("MCP initialized notification failed")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "MCP initialized notification failed with HTTP {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    fn request(&self, body: serde_json::Value, protocol: Option<&str>) -> reqwest::RequestBuilder {
+        let mut builder = self
+            .http
+            .post(&self.resource)
+            .bearer_auth(&self.token)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&body);
+        if let Some(protocol) = protocol {
+            builder = builder.header("MCP-Protocol-Version", protocol);
+        }
+        if let Some(workspace) = &self.workspace {
+            builder = builder.header("Saturation-Workspace", workspace);
+        }
+        builder
+    }
+
+    async fn rpc<T: for<'de> Deserialize<'de>>(
         &self,
-        file_path: &Path,
-        metadata: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let file_name = file_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("upload")
-            .to_string();
-        let file_bytes = tokio::fs::read(file_path)
+        request: serde_json::Value,
+        protocol: Option<&str>,
+    ) -> Result<T> {
+        let builder = self.request(request, protocol);
+        let response = builder.send().await.context("MCP request failed")?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
             .await
-            .with_context(|| format!("failed to read {}", file_path.display()))?;
-        let file_part = reqwest::multipart::Part::bytes(file_bytes)
-            .file_name(file_name)
-            .mime_str("application/octet-stream")?;
-        let meta_part = reqwest::multipart::Part::text(serde_json::to_string(&metadata)?)
-            .mime_str("application/json")?;
-        let form = reqwest::multipart::Form::new()
-            .part("file", file_part)
-            .part("metadata", meta_part);
-        let resp = self
-            .http
-            .post(self.url("upload"))
-            .bearer_auth(&self.token)
-            .multipart(form)
-            .send()
-            .await
-            .context("upload request failed")?;
-        self.unwrap_envelope(resp).await
-    }
-
-    /// Map the internal `{success,data,summary}` envelope to the data payload,
-    /// surfacing `error`/`message` on failure.
-    async fn unwrap_envelope(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
-        let status = resp.status();
-        let bytes = resp.bytes().await.context("failed to read response")?;
+            .context("failed to read MCP response")?;
         if !status.is_success() {
-            // Error envelope may carry a typed message; surface it.
-            if let Ok(env) = serde_json::from_slice::<AgentEnvelope>(&bytes) {
-                let msg = env.message.or(env.error).unwrap_or_default();
-                anyhow::bail!("HTTP {status}: {msg}");
-            }
-            anyhow::bail!("HTTP {status}: {}", String::from_utf8_lossy(&bytes));
+            anyhow::bail!("MCP request failed with HTTP {status}");
         }
-        let env: AgentEnvelope =
-            serde_json::from_slice(&bytes).context("failed to parse agent response")?;
-        if !env.success {
-            let msg = env
-                .error
-                .or(env.message)
-                .unwrap_or_else(|| "tool failed".into());
-            anyhow::bail!("agent error: {msg}");
+        let envelope: RpcEnvelope<T> =
+            serde_json::from_slice(&bytes).context("failed to parse MCP response")?;
+        if let Some(error) = envelope.error {
+            anyhow::bail!("MCP error {}: {}", error.code, error.message);
         }
-        // Attach the summary as a sibling so callers can show it without a second call.
-        let mut data = env.data.unwrap_or(serde_json::Value::Null);
-        if let (Some(summary), serde_json::Value::Object(map)) = (env.summary, &mut data) {
-            map.entry("_summary")
-                .or_insert(serde_json::Value::String(summary));
-        }
-        Ok(data)
+        envelope
+            .result
+            .context("MCP response did not include a result")
     }
 
-    #[allow(dead_code)] // public accessor; exercised by unit tests
-    pub fn workspace_id(&self) -> &str {
-        &self.workspace_id
+    #[cfg(test)]
+    fn resource(&self) -> &str {
+        &self.resource
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{TokenInfo, WorkspaceInfo};
+    use crate::config::{OAuthInfo, TokenInfo};
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn cfg() -> Config {
+    fn config() -> Config {
         Config {
-            server: Some("http://localhost:4001".into()),
-            active_workspace: Some("ws-1".into()),
             token: Some(TokenInfo {
-                access_token: "tok".into(),
-                refresh_token: "ref".into(),
-                expires_at: "2099-01-01".into(),
+                access_token: "token".into(),
+                refresh_token: "refresh".into(),
+                expires_at: "2099-01-01T00:00:00Z".into(),
             }),
-            workspaces: {
-                let mut m = std::collections::HashMap::new();
-                m.insert(
-                    "ws-1".into(),
-                    WorkspaceInfo {
-                        name: "T".into(),
-                        role: "admin".into(),
-                    },
-                );
-                m
-            },
-            ..Default::default()
+            oauth: Some(OAuthInfo {
+                client_id: "client".into(),
+                token_endpoint: "https://connect.saturation.io/oauth2/token".into(),
+                resource: "https://mcp.saturation.io/mcp".into(),
+            }),
+            ..Config::default()
         }
     }
 
     #[test]
-    fn builds_tool_url() {
-        let c = AgentClient::from_config(&cfg(), None).unwrap();
-        assert_eq!(c.url("tools"), "http://localhost:4001/api/cli/ws-1/tools");
-        assert_eq!(
-            c.url("tool/query"),
-            "http://localhost:4001/api/cli/ws-1/tool/query"
-        );
+    fn oauth_resource_is_the_agent_transport() {
+        let client = AgentClient::from_config(&config(), None).unwrap();
+        assert_eq!(client.resource(), "https://mcp.saturation.io/mcp");
     }
 
-    #[test]
-    fn workspace_override_wins() {
-        let c = AgentClient::from_config(&cfg(), Some("ws-other")).unwrap();
-        assert_eq!(c.workspace_id(), "ws-other");
+    #[tokio::test]
+    async fn list_tools_initializes_and_sends_the_oauth_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(header("authorization", "Bearer token"))
+            .and(body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-11-25",
+                    "capabilities": {},
+                    "clientInfo": { "name": "saturation-cli", "version": env!("CARGO_PKG_VERSION") }
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 0,
+                "result": { "protocolVersion": "2025-11-25" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(header("mcp-protocol-version", "2025-11-25"))
+            .and(body_json(serde_json::json!({
+                "jsonrpc": "2.0", "method": "notifications/initialized"
+            })))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(header("mcp-protocol-version", "2025-11-25"))
+            .and(header("saturation-workspace", "ws_override"))
+            .and(body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1,
+                "result": { "tools": [{ "name": "find", "description": "Find records", "inputSchema": {} }] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut cfg = config();
+        cfg.oauth.as_mut().unwrap().resource = format!("{}/mcp", server.uri());
+        let client = AgentClient::from_config(&cfg, Some("ws_override")).unwrap();
+        let tools = client.list_tools().await.unwrap();
+        assert_eq!(tools[0].name, "find");
     }
 }

@@ -42,22 +42,31 @@ checksums and build provenance for each binary.
 
 ## Get started
 
-Create a personal token in Saturation under **Settings > Developers > API**, then
-save it locally:
+Sign in through Saturation:
 
 ```console
-saturation auth token "$SATURATION_API_TOKEN"
+saturation login
 ```
 
-Check the connection and list your projects:
+The CLI opens your browser for the same Saturation login, MFA, workspace selection,
+and consent flow used by MCP. The browser returns the authorization to the local
+CLI through a short-lived callback on `127.0.0.1`.
+
+Check the session and list your projects:
 
 ```console
 saturation auth status
 saturation v1 projects list
 ```
 
-The CLI stores credentials in `~/.saturation/config.json`. On Unix systems, the
+The CLI stores the OAuth session in `~/.saturation/config.json`. On Unix systems, the
 directory is readable only by your user and the file uses mode `0600`.
+
+For a personal token instead, create one under **Settings > Developers > API**:
+
+```console
+saturation auth token "$SATURATION_API_TOKEN"
+```
 
 For CI, pass a protected token file instead of saving credentials:
 
@@ -88,15 +97,18 @@ Run `saturation --help` to see the full command tree. Run any command with
 
 | Command | Purpose |
 | --- | --- |
+| `saturation login` | Sign in through Saturation OAuth |
+| `saturation logout` | Clear the stored OAuth session |
 | `saturation auth` | Save, inspect, or remove an API token |
 | `saturation v1` | Work with the public API resource grammar |
 | `saturation agent` | Discover and invoke workspace agent tools |
-| `saturation workspace` | Select the workspace used by agent tools |
 | `saturation schema` | Print machine-readable command and tool definitions |
 
 The `v1` client is generated from the same OpenAPI specification used by the
 [TypeScript SDK](https://github.com/Saturation-IO/saturation-sdk-typescript) and
-the [API documentation](https://docs.saturation.io).
+the [API documentation](https://docs.saturation.io). Agent-readable references
+are available in [llms.txt](https://docs.saturation.io/llms.txt) and the
+[OpenAPI specification](https://docs.saturation.io/openapi.yaml).
 
 ## Configuration
 
@@ -104,12 +116,11 @@ the [API documentation](https://docs.saturation.io).
 | --- | --- | --- |
 | `--token-file` | `SATURATION_TOKEN_FILE` | Read a bearer token from a file for each command |
 | `--api-base-url` | `SATURATION_API_BASE_URL` | Override the public API base URL |
-| `--server` | `SATURATION_SERVER_URL` | Override the auth and agent server URL |
 | `--format` | | Choose `json`, `table`, or `csv` output |
 | `--quiet` | | Print data without headers or metadata |
 
-The token selects the workspace for public API commands. `saturation workspace`
-controls the separate agent tool context.
+The token selects the workspace. `saturation agent --workspace ID` can address
+another workspace when the credential and server permissions allow it.
 
 ## Build from source
 

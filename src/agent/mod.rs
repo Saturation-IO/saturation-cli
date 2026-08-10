@@ -1,20 +1,6 @@
-//! The `sat agent` namespace: the agent-runtime tools, re-pointed at the
-//! server's already-consolidated registry endpoints.
-//!
-//! - `GET  /api/cli/:ws/tools`            — discover the tool registry.
-//! - `POST /api/cli/:ws/tool/:toolName`   — invoke any registered tool.
-//! - `POST /api/cli/:ws/upload`           — server-specific multipart upload.
-//!
-//! The agent surface keeps the internal `{ success: true, data, summary }`
-//! envelope (server `routes/cli/index.ts`), which is distinct from the `/v1`
-//! §5d model. A thin adapter ([`AgentClient`]) handles that envelope so the two
-//! coexist cleanly: the `/v1` client never sees `{success:true}`, and the agent
-//! client never sees the §5d shape.
-//!
-//! Subcommands are NOT a hand-maintained list — `sat agent tools` proxies the
-//! registry, and `sat agent call <tool>` dispatches anything the registry
-//! advertises. The named shortcuts (`query`, `upload`) are ergonomic aliases
-//! for the most common v3 operations.
+//! The `saturation agent` namespace is a thin client for the public MCP endpoint.
+//! It shares the OAuth token and tool catalog used by Claude, OpenAI, and other
+//! MCP clients.
 
 pub mod cli;
 pub mod client;
@@ -47,19 +33,19 @@ pub async fn execute(args: AgentArgs, client: &AgentClient, output: &Output) -> 
             output.print(&result)
         }
         AgentCommand::Upload {
-            file,
+            source_url,
             project,
-            classification,
         } => {
-            let mut meta = serde_json::Map::new();
+            let mut params = serde_json::Map::new();
+            params.insert("sourceUrl".into(), serde_json::Value::String(source_url));
             if let Some(p) = project {
-                meta.insert("projectId".into(), serde_json::Value::String(p));
-            }
-            if let Some(c) = classification {
-                meta.insert("classification".into(), serde_json::Value::String(c));
+                params.insert(
+                    "assignTo".into(),
+                    serde_json::json!({ "kind": "project", "id": p }),
+                );
             }
             let result = client
-                .upload(std::path::Path::new(&file), serde_json::Value::Object(meta))
+                .call_tool("upload", &serde_json::Value::Object(params))
                 .await?;
             output.print(&result)
         }

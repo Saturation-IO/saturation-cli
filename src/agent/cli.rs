@@ -4,12 +4,10 @@ use clap::{Args, Subcommand};
 
 #[derive(Args)]
 #[command(
-    about = "Agent-runtime tools — discover and invoke the workspace tool registry",
-    long_about = "The agent surface dispatches through the server's consolidated tool registry:\n  \
-        GET  /api/cli/:ws/tools           — discover available tools\n  \
-        POST /api/cli/:ws/tool/:toolName  — invoke any tool\n\n\
-        Discovery is registry-driven (not a hand-maintained list), so `agent call`\n\
-        can invoke anything `agent tools` advertises.\n\n\
+    about = "Discover and invoke the public Saturation MCP tools",
+    long_about = "The agent surface uses the same public MCP endpoint and OAuth session as other MCP clients.\n\n\
+        Discovery comes from tools/list, so `agent call` can invoke anything\n\
+        `agent tools` advertises.\n\n\
         Examples:\n  \
         saturation agent tools\n  \
         saturation agent call query --params '{\"domain\":\"workspace\",\"sql\":\"SELECT id, name FROM projects LIMIT 10\"}'\n  \
@@ -26,10 +24,10 @@ pub struct AgentArgs {
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// List the tools advertised by the workspace registry (`GET /tools`).
+    /// List the tools advertised by MCP (`tools/list`).
     Tools,
 
-    /// Invoke any registered tool by name (`POST /tool/:toolName`).
+    /// Invoke any advertised MCP tool by name (`tools/call`).
     Call {
         /// Tool name (as listed by `agent tools`).
         tool: String,
@@ -51,15 +49,12 @@ pub enum AgentCommand {
         stdin: bool,
     },
 
-    /// Upload a document via the agent upload endpoint.
+    /// Upload a document from a public HTTPS URL through the MCP upload tool.
     Upload {
-        /// File path to upload.
-        file: String,
+        /// Public HTTPS URL containing the document bytes.
+        source_url: String,
         /// Assign to a project.
         #[arg(long)]
         project: Option<String>,
-        /// Document classification.
-        #[arg(long)]
-        classification: Option<String>,
     },
 }

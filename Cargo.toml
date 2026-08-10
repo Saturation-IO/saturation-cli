@@ -57,6 +57,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Base64 (for JWT payload decoding)
 base64 = "0.22"
+rand = "0.9"
+sha2 = "0.10"
+open = "5"
 
 # Progenitor codegen toolchain. Uncomment to regenerate the typed /v1 client at
 # build time (with `--features progenitor-gen`). Pinned, pure-Rust, reqwest-native

@@ -14,13 +14,13 @@ fn saturation() -> Command {
 // ─── Top-level help: dual namespaces + one token ──────────────────────────────
 
 #[test]
-fn top_level_help_lists_both_namespaces_and_token_auth() {
+fn top_level_help_lists_both_namespaces_and_oauth_login() {
     saturation()
         .arg("--help")
         .assert()
         .success()
+        .stdout(predicate::str::contains("login"))
         .stdout(predicate::str::contains("auth"))
-        .stdout(predicate::str::contains("workspace"))
         .stdout(predicate::str::contains("--api-base-url"))
         // /v1 resource namespace
         .stdout(predicate::str::contains("v1"))
@@ -38,10 +38,10 @@ fn version_output() {
         .stdout(predicate::str::contains("saturation"));
 }
 
-// ─── Auth: public API token ───────────────────────────────────────────────────
+// ─── Auth: OAuth login plus personal API token fallback ──────────────────────
 
 #[test]
-fn auth_help_lists_only_supported_token_commands() {
+fn auth_help_lists_personal_token_commands() {
     saturation()
         .args(["auth", "--help"])
         .assert()
@@ -49,7 +49,6 @@ fn auth_help_lists_only_supported_token_commands() {
         .stdout(predicate::str::contains("token"))
         .stdout(predicate::str::contains("logout"))
         .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("login").not())
         .stdout(predicate::str::contains("device").not())
         .stdout(predicate::str::contains("refresh").not());
 }
@@ -335,7 +334,7 @@ fn v1_token_file_injects_token_and_emits_json_errors() {
     let output = saturation()
         .args(["v1", "me", "--token-file"])
         .arg(token.path())
-        .args(["--server", "http://127.0.0.1:1"])
+        .args(["--api-base-url", "http://127.0.0.1:1"])
         .output()
         .unwrap();
 
@@ -428,24 +427,11 @@ fn global_quiet_flag() {
         .success();
 }
 
-// ─── Auth status / workspace without config: must not crash ───────────────────
+// ─── Auth status without config: must not crash ───────────────────────────────
 
 #[test]
 fn auth_status_no_config() {
     saturation().args(["auth", "status"]).assert().success();
-}
-
-#[test]
-fn workspace_list_no_auth() {
-    saturation().args(["workspace", "list"]).assert().success();
-}
-
-#[test]
-fn workspace_current_no_auth() {
-    saturation()
-        .args(["workspace", "current"])
-        .assert()
-        .success();
 }
 
 // ─── Error cases ──────────────────────────────────────────────────────────────

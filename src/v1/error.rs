@@ -3,8 +3,7 @@
 //! Success responses are the **bare resource** (single) or `{ data, nextCursor? }`
 //! (collection) — there is no `success: true` wrapper; clients key off the HTTP
 //! status. Errors carry `{ success: false, code, message, requestId, fieldErrors? }`
-//! with a stable, typed string `code`. This deliberately diverges from the internal
-//! `/api/cli` `{ success: true, data, summary }` envelope used by the `agent` surface.
+//! with a stable, typed string `code`.
 
 use std::collections::HashMap;
 use std::fmt;

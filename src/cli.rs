@@ -9,16 +9,14 @@ use crate::v1::V1Args;
 #[command(
     name = "saturation",
     bin_name = "saturation",
-    about = "CLI for the Saturation public API — production-finance data and agent tools",
+    about = "CLI for the Saturation public API, production-finance data, and agent tools",
     long_about = "Saturation CLI provides programmatic access to your production-finance workspace.\n\n\
         Two namespaces share one API token and one config (~/.saturation/config.json):\n  \
         • the resource grammar (budget, transactions, library, documents, search, ...)\n    \
           is a typed client generated from the public OpenAPI 3.1 (`/v1`)\n  \
         • `agent` exposes the workspace tool registry for AI-agent workflows\n\n\
         Get started:\n  \
-        saturation auth token TOKEN      # Save a token from Settings > Developers > API\n  \
-        saturation workspace list        # See the token's workspace\n  \
-        saturation workspace use ID      # Set the active agent workspace\n  \
+        saturation login                 # Sign in through Saturation OAuth\n  \
         saturation v1 projects list      # Start exploring\n  \
         saturation schema                # Machine-readable command + tool discovery",
     version,
@@ -36,18 +34,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub quiet: bool,
 
-    /// Override the server URL
-    #[arg(long, global = true, env = "SATURATION_SERVER_URL")]
-    pub server: Option<String>,
-
-    /// Override the public API base URL without changing the auth or agent host.
+    /// Override the canonical public API base URL.
     #[arg(long = "api-base-url", global = true, env = "SATURATION_API_BASE_URL")]
     pub api_base_url: Option<String>,
 
     /// Path to a file holding a bearer token, re-read on every invocation.
-    /// Bypasses the stored config token (and ignores any server/workspace in
-    /// config.json) for headless and sandboxed callers that inject a short-TTL
-    /// token.
+    /// Bypasses the stored config token for headless and sandboxed callers.
     #[arg(long = "token-file", global = true, env = "SATURATION_TOKEN_FILE")]
     pub token_file: Option<PathBuf>,
 }
@@ -61,11 +53,14 @@ pub enum OutputFormat {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Manage API-token authentication.
-    Auth(AuthArgs),
+    /// Sign in through Saturation in your browser.
+    Login(LoginArgs),
 
-    /// Manage agent workspace context.
-    Workspace(WorkspaceArgs),
+    /// Clear stored credentials.
+    Logout,
+
+    /// Manage personal API-token authentication.
+    Auth(AuthArgs),
 
     /// Public API resource grammar (`/v1`) — budget, transactions, library, documents, search, webhooks, ...
     #[command(name = "v1", flatten_help = true)]
@@ -76,6 +71,22 @@ pub enum Command {
 
     /// Machine-readable discovery — `/v1` surface (OpenAPI) + agent tools (registry).
     Schema(SchemaArgs),
+}
+
+#[derive(clap::Args)]
+pub struct LoginArgs {
+    /// OAuth authority. Override only for local testing.
+    #[arg(
+        long,
+        env = "SATURATION_OAUTH_ISSUER",
+        default_value = "https://connect.saturation.io",
+        hide = true
+    )]
+    pub issuer: String,
+
+    /// Print the sign-in URL instead of opening a browser.
+    #[arg(long)]
+    pub no_browser: bool,
 }
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
@@ -92,18 +103,11 @@ pub enum AuthCommand {
     #[command(long_about = "Save a personal API token for authenticated commands.\n\
             Create the token under Settings > Developers > API. JWTs minted by\n\
             the sandbox are also accepted for local testing.\n\n\
-            Examples:\n  \
-            saturation auth token \"$SATURATION_API_TOKEN\"\n  \
-            saturation auth token \"$TOKEN\" --server http://localhost:4300")]
+            Example:\n  \
+            saturation auth token \"$SATURATION_API_TOKEN\"")]
     Token {
         /// Personal API token or JWT access token.
         token: String,
-        /// Server URL this token is valid for.
-        #[arg(long)]
-        server: Option<String>,
-        /// Set the active agent workspace.
-        #[arg(long)]
-        workspace: Option<String>,
         /// User email (extracted from JWT if omitted).
         #[arg(long)]
         email: Option<String>,
@@ -117,27 +121,6 @@ pub enum AuthCommand {
     Status,
 }
 
-// ─── Workspace ───────────────────────────────────────────────────────────────
-
-#[derive(clap::Args)]
-pub struct WorkspaceArgs {
-    #[command(subcommand)]
-    pub command: WorkspaceCommand,
-}
-
-#[derive(Subcommand)]
-pub enum WorkspaceCommand {
-    /// List the workspace this token can reach.
-    List,
-    /// Set the active agent workspace for agent commands.
-    Use {
-        /// Workspace ID to activate.
-        id: String,
-    },
-    /// Show the currently active agent workspace.
-    Current,
-}
-
 // ─── Schema ──────────────────────────────────────────────────────────────────
 
 #[derive(clap::Args)]
@@ -145,7 +128,7 @@ pub enum WorkspaceCommand {
     about = "Machine-readable discovery for agents",
     long_about = "Output structured discovery for both namespaces:\n  \
         • `/v1` — the resource surface, sourced from the bundled OpenAPI 3.1\n  \
-        • `agent` — the workspace tool registry, proxied from `GET /api/cli/:ws/tools`\n\n\
+        • `agent` — the public MCP tool catalog\n\n\
         Examples:\n  \
         saturation schema             # both surfaces\n  \
         saturation schema --v1        # just the /v1 resource list (offline)\n  \
@@ -155,7 +138,7 @@ pub struct SchemaArgs {
     /// Emit only the `/v1` resource surface (from the bundled OpenAPI).
     #[arg(long)]
     pub v1: bool,
-    /// Emit only the agent tool registry (live `GET /tools`).
+    /// Emit only the live MCP tool catalog.
     #[arg(long)]
     pub agent: bool,
 }

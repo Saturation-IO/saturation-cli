@@ -4,11 +4,11 @@
 //!   (`openapi/openapi.yaml`). The operation inventory is extracted at build time
 //!   by `build.rs` into `$OUT_DIR/v1_operations.json` and embedded here — no
 //!   runtime YAML dependency, always in sync with the spec.
-//! - the `agent` tool registry, proxied live from `GET /api/cli/:ws/tools`.
+//! - the `agent` tool catalog, read live from the public MCP endpoint.
 //!
 //! This replaces the old 855-line hand-built command tree: the `/v1` half stays
 //! in sync with the OpenAPI, and the agent half stays in sync with the server's
-//! `TOOL_REGISTRY` — neither is hand-maintained.
+//! MCP `tools/list`. Neither is hand-maintained.
 
 use anyhow::{Context, Result};
 
@@ -63,13 +63,13 @@ fn v1_surface() -> Result<serde_json::Value> {
     }))
 }
 
-/// Proxy the live agent tool registry (`GET /tools`).
+/// Read the live public MCP tool catalog.
 async fn agent_surface() -> Result<serde_json::Value> {
     let config = Config::load()?;
     let client = AgentClient::from_config(&config, None)?;
     let tools = client.list_tools().await?;
     Ok(serde_json::json!({
-        "source": "GET /api/cli/:ws/tools (live registry)",
+        "source": "MCP tools/list (https://mcp.saturation.io/mcp)",
         "toolCount": tools.len(),
         "tools": tools,
     }))
