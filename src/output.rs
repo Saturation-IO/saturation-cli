@@ -42,10 +42,6 @@ impl Output {
         }
     }
 
-    pub fn error(&self, message: &str) {
-        eprintln!("{} {message}", "ERROR".red().bold());
-    }
-
     pub fn status(&self, label: &str, value: &str) {
         if !self.quiet {
             println!("{}: {value}", label.bold());
@@ -68,7 +64,7 @@ fn print_table(value: &serde_json::Value, quiet: bool) {
             {
                 first.keys().cloned().collect()
             } else {
-                // Not objects — print each value on its own line
+                // Print each non-object value on its own line.
                 for item in items {
                     println!("{}", format_cell(item));
                 }

@@ -2,26 +2,28 @@
 name = "saturation-cli"
 version = "0.2.0"
 edition = "2021"
-description = "CLI for the Saturation public API, production finance resources, and agent tools"
+description = "CLI for the Saturation public API and production finance resources"
 license = "MIT"
 repository = "https://github.com/Saturation-IO/saturation-cli"
-homepage = "https://docs.saturation.io/#/sdks"
+homepage = "https://docs.saturation.io"
 readme = "README.md"
 build = "build.rs"
 rust-version = "1.85"
 keywords = ["saturation", "production-finance", "api", "cli"]
 categories = ["command-line-utilities", "finance"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "build.rs",
+    "openapi/openapi.yaml",
+    "src/**",
+]
 
 [[bin]]
 name = "saturation"
 path = "src/main.rs"
-
-[features]
-# Run progenitor at build time to (re)generate the typed /v1 client from
-# openapi/openapi.yaml. Off by default: the committed src/v1/generated.rs builds
-# offline. Enabling this pulls a large transitive tree (typify, openapiv3,
-# schemars, a vendored rustfmt). See build.rs and the README.
-progenitor-gen = []
 
 [dependencies]
 # CLI framework
@@ -30,9 +32,8 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# HTTP client. rustls (not native-tls/OpenSSL) for a portable, statically-linked
-# binary: a distributed `saturation` has no libssl runtime dependency. See
-# docs/next/agents/20260617-desktop-pi-dev/saturation-cli-v1-bundling.md (WS-A).
+# HTTP client. rustls avoids a system OpenSSL runtime dependency in distributed
+# binaries.
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls", "charset", "http2"] }
 
 # Serialization
@@ -57,16 +58,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Base64 (for JWT payload decoding)
 base64 = "0.22"
-
-# Progenitor codegen toolchain. Uncomment to regenerate the typed /v1 client at
-# build time (with `--features progenitor-gen`). Pinned, pure-Rust, reqwest-native
-# — no JVM/codegen-server, matching the crate's reqwest 0.12 stack.
-# [build-dependencies]
-# progenitor = "0.14"
-# openapiv3 = "2"
-# serde_yaml = "0.9"
-# syn = "2"
-# prettyplease = "0.2"
+rand = "0.9"
+sha2 = "0.10"
+open = "5"
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -1,16 +1,14 @@
-//! The `sat /v1` namespace: a typed client generated from the same OpenAPI 3.1
-//! that drives the TS SDK, the Scalar docs and the contract tests.
+//! Typed client for the public API contract.
 //!
-//! - [`cli`] — clap subcommands for every `/v1` resource group.
-//! - [`generated`] — the generated transport + operations (progenitor target;
-//!   see `build.rs`).
-//! - [`commands`] — the thin ergonomic dispatch layer over the generated client.
-//! - [`error`] — the §5d response/error model.
+//! - [`cli`] contains clap subcommands for each resource group.
+//! - [`generated`] contains the committed transport and operations.
+//! - [`commands`] dispatches commands through the client.
+//! - [`error`] contains the public response and error model.
 
 pub mod cli;
 pub mod commands;
 pub mod error;
 pub mod generated;
 
-pub use cli::V1Args;
+pub use cli::V1Command;
 pub use generated::Client;

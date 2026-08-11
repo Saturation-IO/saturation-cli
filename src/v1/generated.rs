@@ -2,25 +2,16 @@
 //!
 //! ## Generation
 //!
-//! This module is the Rust counterpart of the TypeScript SDK's `src/generated`
-//! split (`sdk-typescript` ticket): a generated transport + typed operations,
-//! with a thin ergonomic layer (`super::commands`) on top. The single source of
-//! truth is the vendored OpenAPI 3.1 at `openapi/openapi.yaml` (a copy of
-//! `docs/next/next-api-build/openapi/openapi.yaml`).
+//! This module contains generated transport and typed operations with a thin
+//! ergonomic layer (`super::commands`) on top. The public OpenAPI 3.1 contract
+//! at `openapi/openapi.yaml` is the source of truth.
 //!
-//! The intended generator is **progenitor** (pure-Rust, `reqwest`-native — chosen
-//! over openapi-generator to avoid a JVM/codegen-server dependency and to match
-//! the crate's existing `reqwest 0.12` stack). `build.rs` documents the codegen
-//! contract. Because progenitor pulls a large transitive tree (`typify`,
-//! `openapiv3`, `schemars`, a vendored `rustfmt`), this committed module provides
-//! a deterministic, offline-buildable client today; running progenitor (see
-//! `build.rs` and the README "Regenerating the client" section) replaces the
-//! per-operation bodies below with fully-typed request/response structs without
-//! changing the public surface that `super::commands` depends on.
+//! The committed transport keeps builds deterministic and offline. Contract
+//! updates must change this module and the OpenAPI snapshot together.
 //!
 //! The transport implements the spec §5d response model:
 //! - success (2xx): the **bare resource** (single) or `{ data, nextCursor? }`
-//!   (collection); there is no `success: true` wrapper — success is keyed off the
+//!   (collection); there is no `success: true` wrapper. Success is keyed off the
 //!   HTTP status.
 //! - error (non-2xx): `{ success: false, code, message, requestId, fieldErrors? }`
 //!   parsed into [`super::error::ApiError`] with the typed `code` preserved.
@@ -30,6 +21,7 @@ use std::path::Path;
 use reqwest::{Method, StatusCode};
 use serde::Serialize;
 use serde_json::Value;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use super::error::ApiError;
 use super::error::ErrorCode;
@@ -63,8 +55,7 @@ impl Client {
             base.push_str("/v1");
         }
         Self {
-            // Bound every /v1 round-trip: a black-holed host must not hang the CLI
-            // (nor the desktop pi tool that spawns it) indefinitely. (SAT-4696 S1.)
+            // Bound every /v1 round-trip so a black-holed host cannot hang the CLI.
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -87,6 +78,7 @@ impl Client {
         query: Query<'_>,
         body: Option<&B>,
         idempotency_key: Option<&str>,
+        if_none_match: Option<&str>,
     ) -> ApiResult<Value> {
         let mut req = self
             .http
@@ -102,6 +94,9 @@ impl Client {
         if let Some(key) = idempotency_key {
             req = req.header("Idempotency-Key", key);
         }
+        if let Some(etag) = if_none_match {
+            req = req.header("If-None-Match", etag);
+        }
 
         let resp = req
             .send()
@@ -113,9 +108,12 @@ impl Client {
             .await
             .map_err(|e| transport_error(e.to_string()))?;
 
-        if status.is_success() {
+        if status.is_success() || status == StatusCode::NOT_MODIFIED {
             // DELETE returns 204 with no body.
-            if status == StatusCode::NO_CONTENT || bytes.is_empty() {
+            if status == StatusCode::NO_CONTENT
+                || status == StatusCode::NOT_MODIFIED
+                || bytes.is_empty()
+            {
                 return Ok(Value::Null);
             }
             serde_json::from_slice::<Value>(&bytes)
@@ -142,7 +140,18 @@ impl Client {
     // ── Verb helpers used by every operation below ──────────────────────────
 
     pub async fn get(&self, path: &str, query: Query<'_>) -> ApiResult<Value> {
-        self.send::<()>(Method::GET, path, query, None, None).await
+        self.send::<()>(Method::GET, path, query, None, None, None)
+            .await
+    }
+
+    pub async fn get_conditional(
+        &self,
+        path: &str,
+        query: Query<'_>,
+        if_none_match: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.send::<()>(Method::GET, path, query, None, None, if_none_match)
+            .await
     }
 
     pub async fn post<B: Serialize>(
@@ -151,25 +160,97 @@ impl Client {
         body: &B,
         idempotency_key: Option<&str>,
     ) -> ApiResult<Value> {
-        self.send(Method::POST, path, &[], Some(body), idempotency_key)
+        self.send(Method::POST, path, &[], Some(body), idempotency_key, None)
+            .await
+    }
+
+    pub async fn post_with_query<B: Serialize>(
+        &self,
+        path: &str,
+        query: Query<'_>,
+        body: &B,
+        idempotency_key: Option<&str>,
+    ) -> ApiResult<Value> {
+        self.send(Method::POST, path, query, Some(body), idempotency_key, None)
             .await
     }
 
     pub async fn patch<B: Serialize>(&self, path: &str, body: &B) -> ApiResult<Value> {
-        self.send(Method::PATCH, path, &[], Some(body), None).await
+        self.send(Method::PATCH, path, &[], Some(body), None, None)
+            .await
+    }
+
+    pub async fn patch_with_query<B: Serialize>(
+        &self,
+        path: &str,
+        query: Query<'_>,
+        body: &B,
+    ) -> ApiResult<Value> {
+        self.send(Method::PATCH, path, query, Some(body), None, None)
+            .await
     }
 
     pub async fn put<B: Serialize>(&self, path: &str, body: &B) -> ApiResult<Value> {
-        self.send(Method::PUT, path, &[], Some(body), None).await
+        self.send(Method::PUT, path, &[], Some(body), None, None)
+            .await
     }
 
     pub async fn delete(&self, path: &str) -> ApiResult<Value> {
-        self.send::<()>(Method::DELETE, path, &[], None, None).await
+        self.send::<()>(Method::DELETE, path, &[], None, None, None)
+            .await
     }
 
-    /// Multipart document upload (`POST /v1/documents`). The drop step;
-    /// assignment is a separate typed call (`documents/{id}/assign`).
-    pub async fn upload_document(&self, file_path: &Path, metadata: Value) -> ApiResult<Value> {
+    pub async fn delete_with_query(&self, path: &str, query: Query<'_>) -> ApiResult<Value> {
+        self.send::<()>(Method::DELETE, path, query, None, None, None)
+            .await
+    }
+
+    pub async fn stream_get<W>(&self, path: &str, query: Query<'_>, writer: &mut W) -> ApiResult<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut req = self.http.get(self.url(path)).bearer_auth(&self.token);
+        if !query.is_empty() {
+            req = req.query(query);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| transport_error(e.to_string()))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| transport_error(e.to_string()))?;
+            return Err(parse_error(status, &bytes));
+        }
+
+        let mut response = resp;
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| transport_error(e.to_string()))?
+        {
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|e| transport_error(e.to_string()))?;
+        }
+        writer
+            .flush()
+            .await
+            .map_err(|e| transport_error(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Multipart document upload (`POST /v1/documents`).
+    pub async fn upload_document(
+        &self,
+        file_path: &Path,
+        metadata: Value,
+        idempotency_key: Option<&str>,
+    ) -> ApiResult<Value> {
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -190,11 +271,15 @@ impl Client {
             .part("file", file_part)
             .part("metadata", meta_part);
 
-        let resp = self
+        let mut req = self
             .http
             .post(self.url("documents"))
             .bearer_auth(&self.token)
-            .multipart(form)
+            .multipart(form);
+        if let Some(key) = idempotency_key {
+            req = req.header("Idempotency-Key", key);
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| transport_error(e.to_string()))?;
@@ -248,6 +333,21 @@ fn transport_error(message: String) -> ApiError {
         retry_after: None,
         http_status: 0,
     }
+}
+
+fn parse_error(status: StatusCode, bytes: &[u8]) -> ApiError {
+    let mut err = serde_json::from_slice::<ApiError>(bytes).unwrap_or_else(|_| ApiError {
+        success: false,
+        code: status_to_code(status),
+        message: String::from_utf8_lossy(bytes).trim().to_string(),
+        request_id: None,
+        field_errors: None,
+        required_ability: None,
+        retry_after: None,
+        http_status: 0,
+    });
+    err.http_status = status.as_u16();
+    err
 }
 
 /// Map a bare HTTP status (no documented envelope) to the closest typed code so

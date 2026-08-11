@@ -1,10 +1,9 @@
 //! The `/v1` response + error model (spec §5d).
 //!
 //! Success responses are the **bare resource** (single) or `{ data, nextCursor? }`
-//! (collection) — there is no `success: true` wrapper; clients key off the HTTP
+//! (collection). There is no `success: true` wrapper; clients key off the HTTP
 //! status. Errors carry `{ success: false, code, message, requestId, fieldErrors? }`
-//! with a stable, typed string `code`. This deliberately diverges from the internal
-//! `/api/cli` `{ success: true, data, summary }` envelope used by the `agent` surface.
+//! with a stable, typed string `code`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,7 +56,7 @@ pub enum ErrorCode {
     SigningKeyNotConfigured,
     InternalError,
     BudgetComputeTimeout,
-    /// A code not in the documented set — surfaced verbatim, never silently dropped.
+    /// A code outside the documented set, surfaced verbatim.
     #[serde(untagged)]
     Other(String),
 }
@@ -87,7 +86,7 @@ pub struct ApiError {
     pub code: ErrorCode,
     pub message: String,
     pub request_id: Option<String>,
-    /// Present on validation / mass-assignment failures.
+    /// Present for field validation errors, including read-only fields.
     #[serde(default)]
     pub field_errors: Option<HashMap<String, Vec<String>>>,
     /// Present on `permission_revoked` (403): the missing `action:subject` ability.
@@ -103,7 +102,7 @@ pub struct ApiError {
 
 impl ApiError {
     /// Render a self-diagnosable, multi-line error for the terminal. The typed
-    /// `code` is always preserved — never flattened to a generic string.
+    /// `code` is always preserved and never flattened to a generic string.
     pub fn render(&self) -> String {
         let mut out = format!("[{}] {} ({})", self.code, self.message, self.http_status);
         if let Some(rid) = &self.request_id {

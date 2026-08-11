@@ -1,14 +1,9 @@
-//! Eval tests for agent operability.
+//! Eval tests for machine operability.
 //!
-//! Verify that an LLM agent can discover and operate the CLI through the
-//! two-sourced `schema` command and `--help`:
+//! Verify that automation can discover and operate the public CLI through the
+//! offline `schema` command and per-resource `--help`.
 //!
-//! 1. `saturation schema --v1` → the `/v1` operation inventory (offline, from
-//!    the bundled OpenAPI 3.1).
-//! 2. `saturation agent tools` → the live tool registry (`GET /tools`).
-//! 3. `saturation <namespace> <resource> --help` → per-command usage.
-//!
-//! Each test asserts on structure/content an agent needs to operate the CLI.
+//! Each test asserts on structure and content needed to automate the CLI.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -17,30 +12,33 @@ fn saturation() -> Command {
     Command::cargo_bin("saturation").unwrap()
 }
 
-// ─── /v1 discovery is valid, complete JSON ────────────────────────────────────
+// ─── API discovery is valid, complete JSON ───────────────────────────────────
 
 #[test]
 fn eval_schema_is_valid_json() {
-    let output = saturation().args(["schema", "--v1"]).output().unwrap();
+    let output = saturation().arg("schema").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(&stdout).expect("schema output must be valid JSON");
-    assert!(parsed.get("v1").is_some(), "schema must have a 'v1' key");
-    let v1 = &parsed["v1"];
-    assert!(v1.get("operations").is_some(), "v1 must have 'operations'");
+    assert!(parsed.get("api").is_some(), "schema must have an 'api' key");
+    let api = &parsed["api"];
     assert!(
-        v1.get("operationCount").is_some(),
-        "v1 must have 'operationCount'"
+        api.get("operations").is_some(),
+        "api must have 'operations'"
+    );
+    assert!(
+        api.get("operationCount").is_some(),
+        "api must have 'operationCount'"
     );
 }
 
 #[test]
-fn eval_v1_inventory_covers_every_resource_family() {
-    let output = saturation().args(["schema", "--v1"]).output().unwrap();
+fn eval_api_inventory_covers_every_resource_family() {
+    let output = saturation().arg("schema").output().unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let ops = parsed["v1"]["operations"].as_array().unwrap();
+    let ops = parsed["api"]["operations"].as_array().unwrap();
 
     // Collect every operationId and templated path.
     let ids: Vec<&str> = ops
@@ -76,10 +74,9 @@ fn eval_v1_inventory_covers_every_resource_family() {
     for path_needle in &[
         "/budget/lines",
         "/transactions",
-        "/library/rates",
-        "/library/incentives",
+        "/library/rate-packs",
+        "/library/incentive-packs",
         "/search",
-        "/usage",
     ] {
         assert!(
             paths.iter().any(|p| p.contains(path_needle)),
@@ -90,75 +87,52 @@ fn eval_v1_inventory_covers_every_resource_family() {
 
 #[test]
 fn eval_schema_is_deterministic() {
-    let a = saturation().args(["schema", "--v1"]).output().unwrap();
-    let b = saturation().args(["schema", "--v1"]).output().unwrap();
+    let a = saturation().arg("schema").output().unwrap();
+    let b = saturation().arg("schema").output().unwrap();
     assert_eq!(a.stdout, b.stdout, "schema output must be deterministic");
 }
 
-// ─── Every /v1 resource group is a valid --help target ────────────────────────
+// ─── Every API resource group is a valid --help target ───────────────────────
 
 #[test]
-fn eval_all_v1_resource_groups_have_help() {
+fn eval_all_api_resource_groups_have_help() {
     for resource in &[
         "budget",
         "transactions",
         "purchase-orders",
         "library",
-        "incentives",
         "documents",
         "search",
         "webhooks",
-        "usage",
         "contacts",
         "projects",
         "spaces",
-        "comments",
-        "workspaces",
-        "me",
+        "whoami",
     ] {
-        saturation()
-            .args(["v1", resource, "--help"])
-            .assert()
-            .success();
+        saturation().args([resource, "--help"]).assert().success();
     }
 }
 
-// ─── Help text carries examples an agent can copy ─────────────────────────────
-
 #[test]
-fn eval_agent_help_contains_examples() {
-    let output = saturation().args(["agent", "--help"]).output().unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        stdout.contains("saturation") || stdout.contains("Example"),
-        "agent help should contain usage examples"
-    );
-}
-
-#[test]
-fn eval_documents_help_describes_drop_and_assign() {
+fn eval_documents_help_describes_upload_and_link_tasks() {
     saturation()
-        .args(["v1", "documents", "--help"])
+        .args(["documents", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("drop").or(predicate::str::contains("Drop")))
-        .stdout(predicate::str::contains("assign").or(predicate::str::contains("Assign")));
+        .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("link"))
+        .stdout(predicate::str::contains("unlink"));
 }
 
-// ─── Two-sourced schema: /v1 (offline) + agent (live, degrades gracefully) ────
-
 #[test]
-fn eval_schema_default_two_sourced() {
+fn eval_schema_contains_only_the_public_api_surface() {
     let output = saturation().arg("schema").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert!(
-        parsed.get("v1").is_some(),
-        "schema must include the /v1 surface"
+        parsed.get("api").is_some(),
+        "schema must include the public API surface"
     );
-    assert!(
-        parsed.get("agent").is_some(),
-        "schema must include the agent surface (even if unavailable without auth)"
-    );
+    assert!(parsed.get("agent").is_none());
 }
