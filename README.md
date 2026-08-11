@@ -11,16 +11,23 @@ return tables or CSV. API versioning stays behind the command interface.
 
 ## Install
 
-The CLI has not published its first release. Install the current source with
-Rust 1.85 or newer:
+macOS and Linux:
 
 ```console
-git clone https://github.com/Saturation-IO/saturation-cli.git
-cd saturation-cli
-cargo install --path . --locked
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Saturation-IO/saturation-cli/releases/latest/download/saturation-cli-installer.sh | sh
 ```
 
-This installs the `saturation` binary in Cargo's bin directory.
+Windows PowerShell:
+
+```powershell
+irm https://github.com/Saturation-IO/saturation-cli/releases/latest/download/saturation-cli-installer.ps1 | iex
+```
+
+Homebrew:
+
+```console
+brew install Saturation-IO/tap/saturation
+```
 
 ## Get started
 
@@ -131,6 +138,16 @@ The token selects the workspace. Run `saturation whoami` to inspect the active
 identity and workspace.
 
 ## Develop
+
+Build and install from source with Rust 1.85 or newer:
+
+```console
+git clone https://github.com/Saturation-IO/saturation-cli.git
+cd saturation-cli
+cargo install --path . --locked
+```
+
+Run the development checks:
 
 ```console
 cargo build --locked
