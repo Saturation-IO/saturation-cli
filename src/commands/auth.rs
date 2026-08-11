@@ -7,21 +7,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use url::Url;
 
-use crate::cli::{AuthArgs, AuthCommand, LoginArgs};
+use crate::cli::LoginArgs;
 use crate::config::{Config, OAuthInfo, TokenInfo, UserInfo};
 use crate::output::Output;
-
-pub async fn execute(args: AuthArgs, output: &Output) -> Result<()> {
-    match args.command {
-        AuthCommand::Token {
-            token,
-            email,
-            user_id,
-        } => inject_token(token, email, user_id, output),
-        AuthCommand::Logout => logout(output),
-        AuthCommand::Status => status(output),
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct OAuthMetadata {
@@ -58,7 +46,7 @@ struct OAuthTokenResponse {
     id_token: Option<String>,
 }
 
-const MCP_RESOURCE: &str = "https://mcp.saturation.io/mcp";
+const API_RESOURCE: &str = "https://next-api.saturation.io/v1";
 
 pub async fn login(args: LoginArgs, output: &Output) -> Result<()> {
     let issuer = args.issuer.trim_end_matches('/');
@@ -112,7 +100,7 @@ pub async fn login(args: LoginArgs, output: &Output) -> Result<()> {
         .append_pair("code_challenge", &challenge)
         .append_pair("code_challenge_method", "S256")
         .append_pair("scope", "openid profile email offline_access")
-        .append_pair("resource", MCP_RESOURCE)
+        .append_pair("resource", API_RESOURCE)
         .append_pair("state", &state);
 
     output.status("Sign in", authorize.as_str());
@@ -132,7 +120,7 @@ pub async fn login(args: LoginArgs, output: &Output) -> Result<()> {
             ("client_id", registration.client_id.as_str()),
             ("redirect_uri", callback.as_str()),
             ("code_verifier", verifier.as_str()),
-            ("resource", MCP_RESOURCE),
+            ("resource", API_RESOURCE),
         ])
         .send()
         .await
@@ -179,7 +167,7 @@ pub async fn login(args: LoginArgs, output: &Output) -> Result<()> {
     config.oauth = Some(OAuthInfo {
         client_id: registration.client_id,
         token_endpoint: metadata.token_endpoint,
-        resource: MCP_RESOURCE.into(),
+        resource: API_RESOURCE.into(),
     });
     config.user = None;
     hydrate_identity(&mut config, &claims);
@@ -289,95 +277,10 @@ fn hydrate_identity(config: &mut Config, claims: &serde_json::Value) {
     }
 }
 
-fn inject_token(
-    token: String,
-    email: Option<String>,
-    user_id: Option<String>,
-    output: &Output,
-) -> Result<()> {
-    let mut config = Config::load().unwrap_or_default();
-
-    // Personal API tokens are opaque. JWT claims are decoded only to improve
-    // local sandbox status output; the server remains the trust boundary.
-    let claims = decode_jwt_payload(&token).unwrap_or_default();
-    let sub = user_id.or_else(|| claims.get("sub").and_then(|v| v.as_str()).map(String::from));
-    let email = email.or_else(|| {
-        claims
-            .get("email")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-    });
-    let name = claims
-        .get("name")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| {
-            let first = claims
-                .get("firstName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let last = claims
-                .get("lastName")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let full = format!("{first} {last}").trim().to_string();
-            if full.is_empty() {
-                None
-            } else {
-                Some(full)
-            }
-        });
-
-    // Extract expiration
-    let exp = claims
-        .get("exp")
-        .and_then(|v| v.as_i64())
-        .map(|ts| {
-            chrono::DateTime::from_timestamp(ts, 0)
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| ts.to_string())
-        })
-        .unwrap_or_default();
-
-    config.token = Some(TokenInfo {
-        access_token: token,
-        refresh_token: String::new(),
-        expires_at: exp,
-    });
-
-    if let Some(email) = &email {
-        config.user = Some(UserInfo {
-            id: sub.clone().unwrap_or_default(),
-            email: email.clone(),
-            name,
-        });
-    }
-
-    config.save()?;
-
-    if let Some(email) = &email {
-        output.success(&format!("Token set for {email}"));
-    } else {
-        output.success("Token set");
-    }
-
-    output.status(
-        "Expires",
-        config
-            .token
-            .as_ref()
-            .map(|t| t.expires_at.as_str())
-            .unwrap_or("unknown"),
-    );
-
-    Ok(())
-}
-
 // ─── Token refresh ──────────────────────────────────────────────────────────────
 //
-// Older desktop-issued configs may contain a refresh token. Keep those working
-// through the existing native token route without advertising a second login
-// model for new CLI installs.
+// OAuth sessions may contain a refresh token. Use the recorded token endpoint
+// so the CLI can renew an expired session.
 
 #[derive(Debug, Deserialize)]
 struct RefreshResponse {
@@ -477,29 +380,6 @@ pub fn logout(output: &Output) -> Result<()> {
     Ok(())
 }
 
-fn status(output: &Output) -> Result<()> {
-    let config = Config::load()?;
-
-    match &config.user {
-        Some(user) => {
-            output.status("User", &user.email);
-            if let Some(name) = &user.name {
-                output.status("Name", name);
-            }
-        }
-        None => {
-            output.status("Status", "Not authenticated");
-            return Ok(());
-        }
-    }
-
-    if let Some(token) = &config.token {
-        output.status("Token expires", &token.expires_at);
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,7 +428,7 @@ mod tests {
             oauth: Some(OAuthInfo {
                 client_id: "client_test".into(),
                 token_endpoint: format!("{}/oauth2/token", server.uri()),
-                resource: "https://mcp.saturation.io/mcp".into(),
+                resource: API_RESOURCE.into(),
             }),
             ..Config::default()
         };

@@ -43,16 +43,6 @@ fn build_query(
             q.push((k, v));
         }
     }
-    // Raw `--filter key=value` escape hatch. Leaked here so the generated client
-    // can express any documented param without a dedicated flag.
-    for raw in &flags.filters {
-        if let Some((k, v)) = raw.split_once('=') {
-            // Leak the key string so it satisfies the `'static` query API; this
-            // runs once per invocation, so the small leak is acceptable.
-            let key: &'static str = Box::leak(k.to_string().into_boxed_str());
-            q.push((key, v.to_string()));
-        }
-    }
     q
 }
 
@@ -61,17 +51,8 @@ fn parse_json(data: &str) -> Result<Value> {
     serde_json::from_str(data).map_err(|e| anyhow::anyhow!("invalid JSON body: {e}"))
 }
 
-/// Build the `POST /documents/{id}/assign` body. The handler is `.strict()` and
-/// requires the nested `{ target: { kind, id }, replace? }` shape
-/// (`DocumentAssignRequest`); a flat `{ kind, id }` is rejected with `422`.
-fn document_assign_body(kind: &str, id: &str, replace: bool) -> Value {
-    serde_json::json!({ "target": { "kind": kind, "id": id }, "replace": replace })
-}
-
-/// Build the `POST /documents/{id}/unassign` body (`DocumentUnassignRequest`):
-/// nested `{ target: { kind, id } }`. No `replace` field on this surface.
-fn document_unassign_body(kind: &str, id: &str) -> Value {
-    serde_json::json!({ "target": { "kind": kind, "id": id } })
+fn document_link_body(target_id: &str, replace: bool) -> Value {
+    serde_json::json!({ "targetId": target_id, "replace": replace })
 }
 
 /// Render the result of a `/v1` call. Success prints the bare resource /
@@ -86,9 +67,8 @@ fn render(result: ApiResult<Value>, output: &Output) -> Result<()> {
         Err(err) => {
             if matches!(output.format, OutputFormat::Json) {
                 // Emit the typed §5d envelope as a single JSON line on stderr and
-                // exit non-zero, bypassing anyhow's "Error: " Debug wrapper so a
-                // structured caller (the desktop `saturationV1` tool) parses clean
-                // JSON for `code` / `message` / `fieldErrors` self-correction.
+                // exit non-zero, bypassing anyhow's "Error: " Debug wrapper so
+                // scripts can parse `code`, `message`, and `fieldErrors`.
                 let json = serde_json::to_string(&err).unwrap_or_else(|_| err.render());
                 eprintln!("{json}");
                 std::process::exit(1);
@@ -98,36 +78,130 @@ fn render(result: ApiResult<Value>, output: &Output) -> Result<()> {
     }
 }
 
-pub async fn execute(args: V1Args, client: &Client, output: &Output) -> Result<()> {
-    let idem = args.idempotency_key.as_deref();
-    let project = args.project.clone();
+fn render_stream(result: ApiResult<()>, output: &Output) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if matches!(output.format, OutputFormat::Json) {
+                let json = serde_json::to_string(&err).unwrap_or_else(|_| err.render());
+                eprintln!("{json}");
+                std::process::exit(1);
+            }
+            Err(anyhow::anyhow!("{}", err.render()))
+        }
+    }
+}
+
+fn requires_idempotency_key(command: &V1Command) -> bool {
+    match command {
+        V1Command::Projects(ProjectArgs {
+            command:
+                ProjectCommand::Create { .. }
+                | ProjectCommand::Comments(ProjectCommentArgs {
+                    command: CrudCommand::Create { .. },
+                    ..
+                }),
+        })
+        | V1Command::Contacts(ResourceArgs {
+            command: ResourceCommand::Create { .. },
+        })
+        | V1Command::Spaces(CrudArgs {
+            command: CrudCommand::Create { .. },
+        }) => true,
+        V1Command::Budget(BudgetArgs { command }) => matches!(
+            command,
+            BudgetCommand::Lines(LineArgs {
+                command: LineCommand::Create { .. } | LineCommand::Bulk { .. }
+            }) | BudgetCommand::PhaseData(BudgetPhaseDataArgs {
+                command: BudgetPhaseDataCommand::Bulk { .. }
+            }) | BudgetCommand::Phases(ResourceCommandWrap {
+                command: ResourceCommand::Create { .. }
+            })
+        ),
+        V1Command::Transactions(TransactionArgs { command }) => matches!(
+            command,
+            TransactionCommand::Create { .. }
+                | TransactionCommand::Bulk { .. }
+                | TransactionCommand::Items(TxItemArgs {
+                    command: CrudCommand::Create { .. },
+                    ..
+                })
+        ),
+        V1Command::PurchaseOrders(PurchaseOrderArgs { command }) => matches!(
+            command,
+            PurchaseOrderCommand::Create { .. }
+                | PurchaseOrderCommand::Items(PoItemArgs {
+                    command: CrudCommand::Create { .. },
+                    ..
+                })
+        ),
+        V1Command::Library(LibraryArgs { command }) => match command {
+            LibraryCommand::RatePacks(LibraryRatesArgs { command }) => matches!(
+                command,
+                LibraryRatesCommand::Create { .. }
+                    | LibraryRatesCommand::Items(RatePackItemArgs {
+                        command: CrudCommand::Create { .. },
+                        ..
+                    })
+            ),
+            LibraryCommand::Fringes(LibraryCrudArgs { command })
+            | LibraryCommand::Globals(LibraryCrudArgs { command })
+            | LibraryCommand::Currencies(LibraryCrudArgs { command })
+            | LibraryCommand::FringeGroups(LibraryCrudArgs { command })
+            | LibraryCommand::Tags(LibraryCrudArgs { command }) => {
+                matches!(command, LibraryCrudCommand::Create { .. })
+            }
+            LibraryCommand::Units(LibraryUnitsArgs {
+                command: LibraryUnitsCommand::Create { .. },
+            }) => true,
+            LibraryCommand::Incentives(_) | LibraryCommand::Project(_) => false,
+            LibraryCommand::Units(_) => false,
+        },
+        _ => false,
+    }
+}
+
+fn supports_project_scope(command: &V1Command) -> bool {
+    matches!(
+        command,
+        V1Command::Budget(_)
+            | V1Command::Library(LibraryArgs {
+                command: LibraryCommand::Project(_),
+            })
+            | V1Command::Search(_)
+            | V1Command::Transactions(_)
+            | V1Command::PurchaseOrders(_)
+            | V1Command::PaymentRequests(_)
+            | V1Command::Payments(_)
+    )
+}
+
+pub async fn execute(
+    command: V1Command,
+    project: Option<String>,
+    idempotency_key: Option<String>,
+    client: &Client,
+    output: &Output,
+) -> Result<()> {
+    let idem = idempotency_key.as_deref();
+    if requires_idempotency_key(&command) && idem.is_none() {
+        anyhow::bail!("this create requires --idempotency-key <KEY>");
+    }
+    if project.is_some() && !supports_project_scope(&command) {
+        anyhow::bail!("--project is not valid for this command");
+    }
     let require_project = || -> Result<String> {
         project.clone().ok_or_else(|| {
             anyhow::anyhow!("this resource is project-scoped; pass --project <slug|id>")
         })
     };
 
-    match args.command {
+    match command {
         // ── Meta / identity ──────────────────────────────────────────────────
-        V1Command::Me => render(client.get("me", &[]).await, output),
-
-        V1Command::Workspaces(a) => {
-            let q = build_query(&a.flags, vec![]);
-            render(client.get("workspaces", &q).await, output)
-        }
+        V1Command::Whoami => render(client.get("me", &[]).await, output),
 
         // ── Generic resources ────────────────────────────────────────────────
-        V1Command::Projects(a) => {
-            generic_resource(
-                a.command,
-                client,
-                output,
-                idem,
-                &client.ws_path("projects"),
-                "projects",
-            )
-            .await
-        }
+        V1Command::Projects(a) => projects(a.command, client, output, idem).await,
         V1Command::Spaces(a) => {
             crud_resource(a.command, client, output, idem, &client.ws_path("spaces")).await
         }
@@ -142,10 +216,6 @@ pub async fn execute(args: V1Args, client: &Client, output: &Output) -> Result<(
             )
             .await
         }
-        V1Command::Comments(a) => {
-            crud_resource(a.command, client, output, idem, &client.ws_path("comments")).await
-        }
-
         // ── Budget ────────────────────────────────────────────────────────────
         V1Command::Budget(a) => {
             let p = require_project()?;
@@ -167,42 +237,26 @@ pub async fn execute(args: V1Args, client: &Client, output: &Output) -> Result<(
         V1Command::Payments(a) => payments(a.command, client, output, project.as_deref()).await,
 
         // ── Library (workspace source scope) ──────────────────────────────────────
-        V1Command::Library(a) => library(a.command, client, output, idem).await,
-
-        // ── Project-resident Library ──────────────────────────────────────────────
-        V1Command::ProjectLibrary(a) => {
-            let p = require_project()?;
-            project_library(a.command, client, output, idem, &p).await
-        }
-
-        V1Command::Incentives(a) => incentives(a.command, client, output).await,
-
-        // ── Saved views ───────────────────────────────────────────────────────────
-        V1Command::Views(a) => {
-            let p = require_project()?;
-            views(a.command, client, output, &p).await
-        }
+        V1Command::Library(a) => library(a.command, client, output, idem, project.as_deref()).await,
 
         // ── Documents ───────────────────────────────────────────────────────────
-        V1Command::Documents(a) => {
-            documents(a.command, client, output, idem, project.as_deref()).await
-        }
+        V1Command::Documents(a) => documents(a.command, client, output, idem).await,
 
         // ── Search ──────────────────────────────────────────────────────────────
         V1Command::Search(a) => {
-            let q = build_query(&a.flags, vec![("q", Some(a.query)), ("types", a.types)]);
-            let path = match &project {
-                Some(p) => client.project_path(p, "search"),
-                None => client.ws_path("search"),
-            };
-            render(client.get(&path, &q).await, output)
+            let q = build_query(
+                &a.flags,
+                vec![
+                    ("q", Some(a.query)),
+                    ("types", a.types),
+                    ("projectId", project),
+                ],
+            );
+            render(client.get(&client.ws_path("search"), &q).await, output)
         }
 
         // ── Webhooks ──────────────────────────────────────────────────────────────
         V1Command::Webhooks(a) => webhooks(a.command, client, output, idem).await,
-
-        // ── Usage ───────────────────────────────────────────────────────────────
-        V1Command::Usage(a) => usage(a.command, client, output, project.as_deref()).await,
     }
 }
 
@@ -238,8 +292,67 @@ async fn generic_resource(
     }
 }
 
+async fn projects(
+    cmd: ProjectCommand,
+    client: &Client,
+    output: &Output,
+    idem: Option<&str>,
+) -> Result<()> {
+    let base = client.ws_path("projects");
+    match cmd {
+        ProjectCommand::List(flags) => render(
+            client.get(&base, &build_query(&flags, vec![])).await,
+            output,
+        ),
+        ProjectCommand::Get { id, flags } => render(
+            client
+                .get(&format!("{base}/{id}"), &build_query(&flags, vec![]))
+                .await,
+            output,
+        ),
+        ProjectCommand::Create { data } => {
+            render(client.post(&base, &parse_json(&data)?, idem).await, output)
+        }
+        ProjectCommand::Update { id, data } => render(
+            client
+                .patch(&format!("{base}/{id}"), &parse_json(&data)?)
+                .await,
+            output,
+        ),
+        ProjectCommand::Comments(args) => {
+            project_comments(args.command, client, output, idem, &args.project_id).await
+        }
+    }
+}
+
+async fn project_comments(
+    cmd: CrudCommand,
+    client: &Client,
+    output: &Output,
+    idem: Option<&str>,
+    project: &str,
+) -> Result<()> {
+    let base = client.project_path(project, "comments");
+    match cmd {
+        CrudCommand::List(flags) => render(
+            client.get(&base, &build_query(&flags, vec![])).await,
+            output,
+        ),
+        CrudCommand::Create { data } => {
+            render(client.post(&base, &parse_json(&data)?, idem).await, output)
+        }
+        CrudCommand::Update { id, data } => render(
+            client
+                .patch(&format!("{base}/{id}"), &parse_json(&data)?)
+                .await,
+            output,
+        ),
+        CrudCommand::Delete { id } => render(client.delete(&format!("{base}/{id}")).await, output),
+    }
+}
+
 /// CRUD for a collection whose single-resource path has no `GET /{id}` (spaces,
-/// comments, line items, custom units): list / create / update / delete only.
+/// comments, and line items): list / create / update / delete only.
 async fn crud_resource(
     cmd: CrudCommand,
     client: &Client,
@@ -273,39 +386,42 @@ async fn budget(
 ) -> Result<()> {
     let base = |suffix: &str| client.project_path(project, suffix);
     match cmd {
-        BudgetCommand::Document(f) => {
+        BudgetCommand::Get(f) => {
             let q = vec![
                 ("path", f.path),
                 ("accountCode", f.account_code),
+                ("accountId", f.account_id),
                 ("phase", f.phase),
+                ("tags", f.tags),
+                ("tagMode", f.tag_mode),
+                ("dateFrom", f.date_from),
+                ("dateTo", f.date_to),
+                (
+                    "includeHiddenPhases",
+                    f.include_hidden_phases.then(|| "true".to_string()),
+                ),
+                ("expand", f.expand),
             ]
             .into_iter()
             .filter_map(|(key, value)| value.map(|value| (key, value)))
             .collect::<Vec<_>>();
-            render(client.get(&base("budget"), &q).await, output)
+            render(
+                client
+                    .get_conditional(&base("budget"), &q, f.if_none_match.as_deref())
+                    .await,
+                output,
+            )
         }
-        BudgetCommand::Totals(f) => render(
+        BudgetCommand::PhaseTotals(f) => render(
             client
-                .get(&base("budget/totals"), &build_query(&f, vec![]))
+                .get_conditional(
+                    &base("budget/totals"),
+                    &build_query(&f.flags, vec![]),
+                    f.if_none_match.as_deref(),
+                )
                 .await,
             output,
         ),
-        BudgetCommand::Rollup(f) => render(
-            client
-                .get(&base("budget/rollup"), &build_query(&f, vec![]))
-                .await,
-            output,
-        ),
-        BudgetCommand::Variance(f) => render(
-            client
-                .get(&base("budget/variance"), &build_query(&f, vec![]))
-                .await,
-            output,
-        ),
-        BudgetCommand::Cells { account, column } => {
-            let q = vec![("account", account), ("column", column)];
-            render(client.get(&base("budget/cells"), &q).await, output)
-        }
         BudgetCommand::Lines(la) => budget_lines(la.command, client, output, idem, project).await,
         BudgetCommand::PhaseData(phase_data) => {
             budget_phase_data(phase_data.command, client, output, idem, project).await
@@ -321,12 +437,6 @@ async fn budget(
             )
             .await
         }
-        BudgetCommand::Accounts(f) => render(
-            client
-                .get(&base("budget/accounts"), &build_query(&f, vec![]))
-                .await,
-            output,
-        ),
     }
 }
 
@@ -366,9 +476,9 @@ async fn budget_lines(
         LineCommand::Create { data } => {
             render(client.post(&base, &parse_json(&data)?, idem).await, output)
         }
-        LineCommand::CreateBatch { data } => render(
+        LineCommand::Bulk { data } => render(
             client
-                .post(&format!("{base}/batch"), &parse_json(&data)?, idem)
+                .post(&format!("{base}/bulk"), &parse_json(&data)?, idem)
                 .await,
             output,
         ),
@@ -378,8 +488,17 @@ async fn budget_lines(
                 .await,
             output,
         ),
-        LineCommand::Delete { line_id } => {
-            render(client.delete(&format!("{base}/{line_id}")).await, output)
+        LineCommand::Delete { line_id, reset } => {
+            let q = reset
+                .then(|| ("reset", "true".to_string()))
+                .into_iter()
+                .collect::<Vec<_>>();
+            render(
+                client
+                    .delete_with_query(&format!("{base}/{line_id}"), &q)
+                    .await,
+                output,
+            )
         }
     }
 }
@@ -393,7 +512,7 @@ async fn budget_phase_data(
 ) -> Result<()> {
     let base = client.project_path(project, "budget");
     match cmd {
-        BudgetPhaseDataCommand::Upsert {
+        BudgetPhaseDataCommand::Set {
             line_id,
             phase_id,
             data,
@@ -406,10 +525,10 @@ async fn budget_phase_data(
                 .await,
             output,
         ),
-        BudgetPhaseDataCommand::Batch { data } => render(
+        BudgetPhaseDataCommand::Bulk { data } => render(
             client
                 .post(
-                    &format!("{base}/lines/phase-data/batch"),
+                    &format!("{base}/lines/phase-data/bulk"),
                     &parse_json(&data)?,
                     idem,
                 )
@@ -477,12 +596,9 @@ async fn transactions(
             let q = build_query(&f, vec![("projectId", project_id())]);
             render(client.get(&base("transactions/stats"), &q).await, output)
         }
-        TransactionCommand::Types => {
-            render(client.get(&base("transactions/types"), &[]).await, output)
-        }
-        TransactionCommand::Batch { data } => render(
+        TransactionCommand::Bulk { data } => render(
             client
-                .post(&base("transactions/batch"), &parse_json(&data)?, idem)
+                .post(&base("transactions/bulk"), &parse_json(&data)?, idem)
                 .await,
             output,
         ),
@@ -521,22 +637,38 @@ async fn purchase_orders(
                 output,
             )
         }
-        PurchaseOrderCommand::Create { data } => render(
-            client.post(&base(pos), &parse_json(&data)?, idem).await,
-            output,
-        ),
+        PurchaseOrderCommand::Create { data, expand } => {
+            let q = expand
+                .into_iter()
+                .map(|value| ("expand", value))
+                .collect::<Vec<_>>();
+            render(
+                client
+                    .post_with_query(&base(pos), &q, &parse_json(&data)?, idem)
+                    .await,
+                output,
+            )
+        }
         PurchaseOrderCommand::Update {
             purchase_order_id,
             data,
-        } => render(
-            client
-                .patch(
-                    &base(&format!("{pos}/{purchase_order_id}")),
-                    &parse_json(&data)?,
-                )
-                .await,
-            output,
-        ),
+            expand,
+        } => {
+            let q = expand
+                .into_iter()
+                .map(|value| ("expand", value))
+                .collect::<Vec<_>>();
+            render(
+                client
+                    .patch_with_query(
+                        &base(&format!("{pos}/{purchase_order_id}")),
+                        &q,
+                        &parse_json(&data)?,
+                    )
+                    .await,
+                output,
+            )
+        }
         PurchaseOrderCommand::Delete { purchase_order_id } => render(
             client
                 .delete(&base(&format!("{pos}/{purchase_order_id}")))
@@ -583,44 +715,28 @@ async fn purchase_orders(
                 .await,
             output,
         ),
-        PurchaseOrderCommand::Link {
+        PurchaseOrderCommand::LinkTransaction {
             purchase_order_id,
-            data,
+            transaction_id,
         } => render(
             client
-                .post(
-                    &base(&format!("{pos}/{purchase_order_id}/link")),
-                    &parse_json(&data)?,
-                    idem,
+                .put(
+                    &base(&format!(
+                        "{pos}/{purchase_order_id}/transactions/{transaction_id}"
+                    )),
+                    &Value::Null,
                 )
                 .await,
             output,
         ),
-        PurchaseOrderCommand::Unlink {
+        PurchaseOrderCommand::UnlinkTransaction {
             purchase_order_id,
-            data,
+            transaction_id,
         } => render(
             client
-                .post(
-                    &base(&format!("{pos}/{purchase_order_id}/unlink")),
-                    &parse_json(&data)?,
-                    idem,
-                )
-                .await,
-            output,
-        ),
-        PurchaseOrderCommand::Activity { purchase_order_id } => render(
-            client
-                .get(&base(&format!("{pos}/{purchase_order_id}/activity")), &[])
-                .await,
-            output,
-        ),
-        PurchaseOrderCommand::SuggestedMatches { purchase_order_id } => render(
-            client
-                .get(
-                    &base(&format!("{pos}/{purchase_order_id}/suggested-matches")),
-                    &[],
-                )
+                .delete(&base(&format!(
+                    "{pos}/{purchase_order_id}/transactions/{transaction_id}"
+                )))
                 .await,
             output,
         ),
@@ -639,33 +755,6 @@ async fn purchase_orders(
         PurchaseOrderCommand::Items(item) => {
             let item_base = base(&format!("{pos}/{}/items", item.purchase_order_id));
             crud_resource(item.command, client, output, idem, &item_base).await
-        }
-        PurchaseOrderCommand::Transactions {
-            purchase_order_id,
-            flags,
-        } => {
-            let q = build_query(&flags, vec![]);
-            render(
-                client
-                    .get(
-                        &base(&format!("{pos}/{purchase_order_id}/transactions")),
-                        &q,
-                    )
-                    .await,
-                output,
-            )
-        }
-        PurchaseOrderCommand::Documents {
-            purchase_order_id,
-            flags,
-        } => {
-            let q = build_query(&flags, vec![]);
-            render(
-                client
-                    .get(&base(&format!("{pos}/{purchase_order_id}/documents")), &q)
-                    .await,
-                output,
-            )
         }
     }
 }
@@ -735,9 +824,10 @@ async fn library(
     client: &Client,
     output: &Output,
     idem: Option<&str>,
+    project: Option<&str>,
 ) -> Result<()> {
     match cmd {
-        LibraryCommand::Rates(a) => library_rates(a.command, client, output, idem).await,
+        LibraryCommand::RatePacks(a) => library_rates(a.command, client, output, idem).await,
         LibraryCommand::Fringes(a) => {
             library_crud(a.command, client, output, idem, "fringes").await
         }
@@ -747,16 +837,23 @@ async fn library(
         LibraryCommand::Currencies(a) => {
             library_crud(a.command, client, output, idem, "currencies").await
         }
-        LibraryCommand::FringeTags(a) => {
-            library_crud(a.command, client, output, idem, "fringe-tags").await
+        LibraryCommand::FringeGroups(a) => {
+            library_crud(a.command, client, output, idem, "fringe-groups").await
         }
         LibraryCommand::Tags(a) => library_crud(a.command, client, output, idem, "tags").await,
         LibraryCommand::Units(a) => library_units(a.command, client, output, idem).await,
+        LibraryCommand::Incentives(a) => incentives(a.command, client, output).await,
+        LibraryCommand::Project(a) => {
+            let project = project.ok_or_else(|| {
+                anyhow::anyhow!("project Library tasks require --project <slug|id>")
+            })?;
+            project_library(a.command, client, output, idem, project).await
+        }
     }
 }
 
 /// CRUD for the workspace-Library template sections (fringes / globals /
-/// currencies / fringe-tags / tags): list / get / create / update / delete.
+/// currencies / fringe-groups / tags): list / get / create / update / delete.
 async fn library_crud(
     cmd: LibraryCrudCommand,
     client: &Client,
@@ -796,7 +893,7 @@ async fn library_rates(
     output: &Output,
     idem: Option<&str>,
 ) -> Result<()> {
-    let base = client.ws_path("library/rates");
+    let base = client.ws_path("library/rate-packs");
     match cmd {
         LibraryRatesCommand::List(f) => {
             render(client.get(&base, &build_query(&f, vec![])).await, output)
@@ -819,13 +916,14 @@ async fn library_rates(
         }
         LibraryRatesCommand::Enable { id } => render(
             client
-                .post(&format!("{base}/{id}/enable"), &Value::Null, idem)
+                .post(&format!("{base}/{id}/enablement"), &Value::Null, idem)
                 .await,
             output,
         ),
-        LibraryRatesCommand::Disable { id } => {
-            render(client.delete(&format!("{base}/{id}/enable")).await, output)
-        }
+        LibraryRatesCommand::Disable { id } => render(
+            client.delete(&format!("{base}/{id}/enablement")).await,
+            output,
+        ),
         LibraryRatesCommand::Items(item) => {
             let item_base = format!("{base}/{}/items", item.pack_id);
             crud_resource(item.command, client, output, idem, &item_base).await
@@ -833,8 +931,7 @@ async fn library_rates(
     }
 }
 
-/// Units: built-in + custom read (`GET /library/units`) and custom-unit CRUD
-/// (`/library/units/custom`).
+/// Workspace units.
 async fn library_units(
     cmd: LibraryUnitsCommand,
     client: &Client,
@@ -848,21 +945,41 @@ async fn library_units(
                 .await,
             output,
         ),
-        LibraryUnitsCommand::Custom(a) => {
-            crud_resource(
-                a.command,
-                client,
-                output,
-                idem,
-                &client.ws_path("library/units/custom"),
-            )
-            .await
-        }
+        LibraryUnitsCommand::Get { unit_id } => render(
+            client
+                .get(
+                    &format!("{}/{unit_id}", client.ws_path("library/units")),
+                    &[],
+                )
+                .await,
+            output,
+        ),
+        LibraryUnitsCommand::Create { data } => render(
+            client
+                .post(&client.ws_path("library/units"), &parse_json(&data)?, idem)
+                .await,
+            output,
+        ),
+        LibraryUnitsCommand::Update { unit_id, data } => render(
+            client
+                .patch(
+                    &format!("{}/{unit_id}", client.ws_path("library/units")),
+                    &parse_json(&data)?,
+                )
+                .await,
+            output,
+        ),
+        LibraryUnitsCommand::Delete { unit_id } => render(
+            client
+                .delete(&format!("{}/{unit_id}", client.ws_path("library/units")))
+                .await,
+            output,
+        ),
     }
 }
 
 async fn incentives(cmd: IncentiveCommand, client: &Client, output: &Output) -> Result<()> {
-    let base = client.ws_path("library/incentives");
+    let base = client.ws_path("library/incentive-packs");
     match cmd {
         IncentiveCommand::List(f) => {
             render(client.get(&base, &build_query(&f, vec![])).await, output)
@@ -880,12 +997,12 @@ async fn incentives(cmd: IncentiveCommand, client: &Client, output: &Output) -> 
         }
         IncentiveCommand::Enable { pack_id } => render(
             client
-                .post(&format!("{base}/{pack_id}/enable"), &Value::Null, None)
+                .post(&format!("{base}/{pack_id}/enablement"), &Value::Null, None)
                 .await,
             output,
         ),
         IncentiveCommand::Disable { pack_id } => render(
-            client.delete(&format!("{base}/{pack_id}/enable")).await,
+            client.delete(&format!("{base}/{pack_id}/enablement")).await,
             output,
         ),
     }
@@ -899,28 +1016,24 @@ async fn project_library(
     project: &str,
 ) -> Result<()> {
     match cmd {
-        ProjectLibraryCommand::Rates(a) => {
-            let base = |s: &str| client.project_path(project, &format!("library/rates/{s}"));
+        ProjectLibraryCommand::RatePacks(a) => {
+            let base = |s: &str| client.project_path(project, &format!("library/rate-packs/{s}"));
             match a.command {
                 ProjectRateCommand::List(f) => render(
                     client
                         .get(
-                            &client.project_path(project, "library/rates"),
+                            &client.project_path(project, "library/rate-packs"),
                             &build_query(&f, vec![]),
                         )
                         .await,
                     output,
                 ),
-                ProjectRateCommand::Add { pack_id } => render(
-                    client
-                        .post(&base(&format!("{pack_id}/add")), &Value::Null, idem)
-                        .await,
-                    output,
-                ),
-                ProjectRateCommand::Remove { pack_id } => render(
-                    client.delete(&base(&format!("{pack_id}/add"))).await,
-                    output,
-                ),
+                ProjectRateCommand::Add { pack_id } => {
+                    render(client.put(&base(&pack_id), &Value::Null).await, output)
+                }
+                ProjectRateCommand::Remove { pack_id } => {
+                    render(client.delete(&base(&pack_id)).await, output)
+                }
             }
         }
         ProjectLibraryCommand::Incentives(a) => {
@@ -941,12 +1054,9 @@ async fn project_library(
                         .await,
                     output,
                 ),
-                ProjectIncentiveCommand::Add { data } => render(
-                    client
-                        .post(&format!("{coll}/add"), &parse_json(&data)?, idem)
-                        .await,
-                    output,
-                ),
+                ProjectIncentiveCommand::Add { data } => {
+                    render(client.post(&coll, &parse_json(&data)?, idem).await, output)
+                }
                 ProjectIncentiveCommand::Update { incentive_id, data } => render(
                     client
                         .patch(&format!("{coll}/{incentive_id}"), &parse_json(&data)?)
@@ -968,8 +1078,8 @@ async fn project_library(
         ProjectLibraryCommand::Currencies(a) => {
             project_library_copy(a.command, client, output, idem, project, "currencies").await
         }
-        ProjectLibraryCommand::FringeTags(a) => {
-            project_library_copy(a.command, client, output, idem, project, "fringe-tags").await
+        ProjectLibraryCommand::FringeGroups(a) => {
+            project_library_copy(a.command, client, output, idem, project, "fringe-groups").await
         }
         ProjectLibraryCommand::Tags(a) => {
             let coll = client.project_path(project, "library/tags");
@@ -977,28 +1087,13 @@ async fn project_library(
                 ProjectTagCommand::List(f) => {
                     render(client.get(&coll, &build_query(&f, vec![])).await, output)
                 }
-                ProjectTagCommand::Add { tag_id, data } => {
-                    let body = match data {
-                        Some(d) => parse_json(&d)?,
-                        None => Value::Null,
-                    };
-                    render(
-                        client
-                            .post(&format!("{coll}/{tag_id}/add"), &body, idem)
-                            .await,
-                        output,
-                    )
-                }
-                ProjectTagCommand::Remove { tag_id } => {
-                    render(client.delete(&format!("{coll}/{tag_id}/add")).await, output)
-                }
             }
         }
     }
 }
 
 /// CRUD for the copy-on-use project-Library sections (fringes / globals /
-/// currencies / fringe-tags). `add` posts `{ sourceId }` to `…/{section}/add`.
+/// currencies / fringe-groups). `add` posts `{ sourceId }` to the section.
 async fn project_library_copy(
     cmd: ProjectCopyCommand,
     client: &Client,
@@ -1018,12 +1113,13 @@ async fn project_library_copy(
                 .await,
             output,
         ),
-        ProjectCopyCommand::Add { source_id } => {
+        ProjectCopyCommand::Add { source_id, reset } => {
             let body = serde_json::json!({ "sourceId": source_id });
-            render(
-                client.post(&format!("{coll}/add"), &body, idem).await,
-                output,
-            )
+            let q = reset
+                .then(|| ("reset", "true".to_string()))
+                .into_iter()
+                .collect::<Vec<_>>();
+            render(client.post_with_query(&coll, &q, &body, idem).await, output)
         }
         ProjectCopyCommand::Update { id, data } => render(
             client
@@ -1037,47 +1133,13 @@ async fn project_library_copy(
     }
 }
 
-async fn views(cmd: ViewCommand, client: &Client, output: &Output, project: &str) -> Result<()> {
-    let coll = client.project_path(project, "views");
-    match cmd {
-        ViewCommand::List {
-            subject_type,
-            visibility,
-            flags,
-        } => {
-            let q = build_query(
-                &flags,
-                vec![("subjectType", subject_type), ("visibility", visibility)],
-            );
-            render(client.get(&coll, &q).await, output)
-        }
-        ViewCommand::Get { view_id } => {
-            render(client.get(&format!("{coll}/{view_id}"), &[]).await, output)
-        }
-        ViewCommand::Data { view_id, flags } => {
-            let q = build_query(&flags, vec![]);
-            render(
-                client.get(&format!("{coll}/{view_id}/data"), &q).await,
-                output,
-            )
-        }
-    }
-}
-
 async fn documents(
     cmd: DocumentCommand,
     client: &Client,
     output: &Output,
     idem: Option<&str>,
-    project: Option<&str>,
 ) -> Result<()> {
     let base = client.ws_path("documents");
-    // Project-scoped reverse reads share this guard.
-    let require_project = || -> Result<&str> {
-        project.ok_or_else(|| {
-            anyhow::anyhow!("this reverse read is project-scoped; pass --project <slug|id>")
-        })
-    };
     match cmd {
         DocumentCommand::List(f) => {
             render(client.get(&base, &build_query(&f, vec![])).await, output)
@@ -1089,20 +1151,24 @@ async fn documents(
                 output,
             )
         }
-        DocumentCommand::Drop {
+        DocumentCommand::Upload {
             file,
-            classification,
             name,
+            description,
+            folder_id,
         } => {
             let mut meta = serde_json::Map::new();
-            if let Some(c) = classification {
-                meta.insert("classification".into(), Value::String(c));
-            }
             if let Some(n) = name {
                 meta.insert("name".into(), Value::String(n));
             }
+            if let Some(description) = description {
+                meta.insert("description".into(), Value::String(description));
+            }
+            if let Some(folder_id) = folder_id {
+                meta.insert("folderId".into(), Value::String(folder_id));
+            }
             let result = client
-                .upload_document(std::path::Path::new(&file), Value::Object(meta))
+                .upload_document(std::path::Path::new(&file), Value::Object(meta), idem)
                 .await;
             render(result, output)
         }
@@ -1116,85 +1182,41 @@ async fn documents(
             client.delete(&format!("{base}/{document_id}")).await,
             output,
         ),
-        DocumentCommand::Content { document_id } => render(
-            client
-                .get(&format!("{base}/{document_id}/content"), &[])
-                .await,
-            output,
-        ),
+        DocumentCommand::Content { document_id } => {
+            let mut stdout = tokio::io::stdout();
+            render_stream(
+                client
+                    .stream_get(&format!("{base}/{document_id}/content"), &[], &mut stdout)
+                    .await,
+                output,
+            )
+        }
         DocumentCommand::Extraction { document_id } => render(
             client
                 .get(&format!("{base}/{document_id}/extraction"), &[])
                 .await,
             output,
         ),
-        DocumentCommand::Assign {
+        DocumentCommand::Link {
             document_id,
             kind,
-            id,
+            target_id,
             replace,
-        } => {
-            let body = document_assign_body(&kind, &id, replace);
-            render(
-                client
-                    .post(&format!("{base}/{document_id}/assign"), &body, idem)
-                    .await,
-                output,
-            )
-        }
-        DocumentCommand::Unassign {
-            document_id,
-            kind,
-            id,
-        } => {
-            let body = document_unassign_body(&kind, &id);
-            render(
-                client
-                    .post(&format!("{base}/{document_id}/unassign"), &body, idem)
-                    .await,
-                output,
-            )
-        }
-        DocumentCommand::Assignments { document_id } => render(
+        } => render(
             client
-                .get(&format!("{base}/{document_id}/assignments"), &[])
+                .put(
+                    &format!("{base}/{document_id}/links/{}", kind.api_name()),
+                    &document_link_body(&target_id, replace),
+                )
                 .await,
             output,
         ),
-        DocumentCommand::ByProject { flags } => {
-            let p = require_project()?;
-            let q = build_query(&flags, vec![]);
-            render(
-                client.get(&client.project_path(p, "documents"), &q).await,
-                output,
-            )
-        }
-        DocumentCommand::ByTransaction { tx_id, flags } => {
-            // Transactions are workspace-root; this reverse read is NOT project-scoped.
-            let q = build_query(&flags, vec![]);
-            render(
-                client
-                    .get(
-                        &client.ws_path(&format!("transactions/{tx_id}/documents")),
-                        &q,
-                    )
-                    .await,
-                output,
-            )
-        }
-        DocumentCommand::ByContact { contact_id, flags } => {
-            // Contacts are workspace-level; this reverse read is NOT project-scoped.
-            let q = build_query(&flags, vec![]);
-            render(
-                client
-                    .get(
-                        &client.ws_path(&format!("contacts/{contact_id}/documents")),
-                        &q,
-                    )
-                    .await,
-                output,
-            )
-        }
+        DocumentCommand::Unlink { document_id, kind } => render(
+            client
+                .delete(&format!("{base}/{document_id}/links/{}", kind.api_name()))
+                .await,
+            output,
+        ),
     }
 }
 
@@ -1228,9 +1250,13 @@ async fn webhooks(
         WebhookCommand::Delete { webhook_id } => {
             render(client.delete(&format!("{base}/{webhook_id}")).await, output)
         }
-        WebhookCommand::Ping { webhook_id } => render(
+        WebhookCommand::TestDelivery { webhook_id } => render(
             client
-                .post(&format!("{base}/{webhook_id}/ping"), &Value::Null, None)
+                .post(
+                    &format!("{base}/{webhook_id}/test-delivery"),
+                    &Value::Null,
+                    None,
+                )
                 .await,
             output,
         ),
@@ -1243,36 +1269,6 @@ async fn webhooks(
                 output,
             )
         }
-    }
-}
-
-async fn usage(
-    cmd: UsageCommand,
-    client: &Client,
-    output: &Output,
-    project: Option<&str>,
-) -> Result<()> {
-    match cmd {
-        UsageCommand::Summary(f) => {
-            let path = match project {
-                Some(p) => client.project_path(p, "usage"),
-                None => client.ws_path("usage"),
-            };
-            render(client.get(&path, &build_query(&f, vec![])).await, output)
-        }
-        UsageCommand::Credits => render(
-            client.get(&client.ws_path("usage/credits"), &[]).await,
-            output,
-        ),
-        UsageCommand::Operations(f) => render(
-            client
-                .get(
-                    &client.ws_path("usage/operations"),
-                    &build_query(&f, vec![]),
-                )
-                .await,
-            output,
-        ),
     }
 }
 
@@ -1303,45 +1299,12 @@ mod tests {
     }
 
     #[test]
-    fn raw_filter_splits_on_first_eq() {
-        let flags = ListFlags {
-            filters: vec!["tagMode=all".into(), "kind=line,account".into()],
-            ..Default::default()
-        };
-        let q = build_query(&flags, vec![]);
-        assert!(q.contains(&("tagMode", "all".to_string())));
-        assert!(q.contains(&("kind", "line,account".to_string())));
-    }
-
-    // The `.strict()` assign/unassign handlers reject a flat `{ kind, id }` with
-    // `422`; the contract (`DocumentAssignRequest` / `DocumentUnassignRequest`)
-    // requires the target nested under `target`. These guard the wrapping so the
-    // CLI body matches the OpenAPI schema, not the legacy flat shape.
-    #[test]
-    fn assign_body_nests_target_and_includes_replace() {
-        let body = document_assign_body("transaction", "txn_8f2a", true);
-        // Flat shape must NOT leak — that was the 422 bug.
-        assert!(body.get("kind").is_none());
-        assert!(body.get("id").is_none());
-        assert_eq!(body["target"]["kind"], "transaction");
-        assert_eq!(body["target"]["id"], "txn_8f2a");
+    fn link_body_uses_target_id_and_replace_only() {
+        let body = document_link_body("txn_8f2a", true);
+        assert_eq!(body["targetId"], "txn_8f2a");
         assert_eq!(body["replace"], true);
-    }
-
-    #[test]
-    fn assign_body_defaults_replace_false() {
-        let body = document_assign_body("budgetLine", "lin_3d77", false);
-        assert_eq!(body["replace"], false);
-    }
-
-    #[test]
-    fn unassign_body_nests_target_without_replace() {
-        let body = document_unassign_body("transaction", "txn_8f2a");
         assert!(body.get("kind").is_none());
         assert!(body.get("id").is_none());
-        assert_eq!(body["target"]["kind"], "transaction");
-        assert_eq!(body["target"]["id"], "txn_8f2a");
-        // `replace` is not part of DocumentUnassignRequest (additionalProperties: false).
-        assert!(body.get("replace").is_none());
+        assert!(body.get("target").is_none());
     }
 }

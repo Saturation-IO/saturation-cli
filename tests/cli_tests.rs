@@ -1,8 +1,7 @@
-//! Integration tests for the dual-namespace CLI surface.
+//! Integration tests for the public CLI surface.
 //!
-//! These assert the *intent* of the cli-rust ticket: one binary with two
-//! namespaces (`/v1` resource grammar + `agent` tool registry), one login, and a
-//! two-sourced `schema` that does not require a hand-maintained command tree.
+//! These assert one task-oriented command tree, one login, and an offline
+//! `schema` generated from the public OpenAPI contract.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -11,21 +10,21 @@ fn saturation() -> Command {
     Command::cargo_bin("saturation").unwrap()
 }
 
-// ─── Top-level help: dual namespaces + one token ──────────────────────────────
+// ─── Top-level help ───────────────────────────────────────────────────────────
 
 #[test]
-fn top_level_help_lists_both_namespaces_and_oauth_login() {
+fn top_level_help_lists_resources_and_oauth_login() {
     saturation()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("login"))
-        .stdout(predicate::str::contains("auth"))
+        .stdout(predicate::str::contains("whoami"))
+        .stdout(predicate::str::contains("  auth ").not())
         .stdout(predicate::str::contains("--api-base-url"))
-        // /v1 resource namespace
-        .stdout(predicate::str::contains("v1"))
-        // agent tool namespace
-        .stdout(predicate::str::contains("agent"))
+        .stdout(predicate::str::contains("projects"))
+        .stdout(predicate::str::contains("search"))
+        .stdout(predicate::str::contains("agent").not())
         .stdout(predicate::str::contains("schema"));
 }
 
@@ -38,64 +37,63 @@ fn version_output() {
         .stdout(predicate::str::contains("saturation"));
 }
 
-// ─── Auth: OAuth login plus personal API token fallback ──────────────────────
-
-#[test]
-fn auth_help_lists_personal_token_commands() {
-    saturation()
-        .args(["auth", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("token"))
-        .stdout(predicate::str::contains("logout"))
-        .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("device").not())
-        .stdout(predicate::str::contains("refresh").not());
-}
-
 // ─── /v1 namespace: resource grammar from the OpenAPI inventory ───────────────
 
 #[test]
-fn v1_help_lists_every_resource_group() {
+fn root_help_lists_only_public_task_groups() {
     saturation()
-        .args(["v1", "--help"])
+        .args(["--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("budget"))
         .stdout(predicate::str::contains("transactions"))
         .stdout(predicate::str::contains("purchase-orders"))
         .stdout(predicate::str::contains("library"))
-        .stdout(predicate::str::contains("incentives"))
         .stdout(predicate::str::contains("documents"))
         .stdout(predicate::str::contains("search"))
         .stdout(predicate::str::contains("webhooks"))
-        .stdout(predicate::str::contains("usage"))
         .stdout(predicate::str::contains("contacts"))
         .stdout(predicate::str::contains("projects"))
-        .stdout(predicate::str::contains("project-library"))
-        .stdout(predicate::str::contains("views"));
+        .stdout(predicate::str::contains("project-library").not())
+        .stdout(predicate::str::contains("  incentives ").not())
+        .stdout(predicate::str::contains("  comments ").not())
+        .stdout(predicate::str::contains("  views ").not())
+        .stdout(predicate::str::contains("  usage ").not());
 }
 
 #[test]
 fn v1_budget_help_lists_computed_and_structured_reads() {
     saturation()
-        .args(["v1", "budget", "--help"])
+        .args(["budget", "--help"])
         .assert()
         .success()
-        // the budget "tree" read is exposed as the `document` subcommand
-        .stdout(predicate::str::contains("document"))
-        .stdout(predicate::str::contains("totals"))
-        .stdout(predicate::str::contains("rollup"))
-        .stdout(predicate::str::contains("variance"))
-        .stdout(predicate::str::contains("cells"))
+        .stdout(predicate::str::contains("get"))
+        .stdout(predicate::str::contains("phase-totals"))
         .stdout(predicate::str::contains("lines"))
+        .stdout(predicate::str::contains("phase-data"))
+        .stdout(predicate::str::contains("line-phases").not())
         .stdout(predicate::str::contains("phases"));
+
+    saturation()
+        .args(["budget", "lines", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bulk"))
+        .stdout(predicate::str::contains("create-many").not());
+
+    saturation()
+        .args(["budget", "phase-data", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("set"))
+        .stdout(predicate::str::contains("bulk"))
+        .stdout(predicate::str::contains("set-many").not());
 }
 
 #[test]
 fn v1_transactions_list_exposes_source_type_status_filters() {
     saturation()
-        .args(["v1", "transactions", "list", "--help"])
+        .args(["transactions", "list", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--source"))
@@ -110,7 +108,7 @@ fn v1_transactions_list_exposes_source_type_status_filters() {
 #[test]
 fn v1_purchase_orders_expose_status_actions() {
     saturation()
-        .args(["v1", "purchase-orders", "--help"])
+        .args(["purchase-orders", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("submit"))
@@ -121,28 +119,28 @@ fn v1_purchase_orders_expose_status_actions() {
 }
 
 #[test]
-fn v1_purchase_orders_expose_activity_timeline_and_suggested_matches() {
+fn v1_purchase_orders_expose_timeline_without_duplicate_helpers() {
     saturation()
-        .args(["v1", "purchase-orders", "--help"])
+        .args(["purchase-orders", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("activity"))
         .stdout(predicate::str::contains("timeline"))
-        .stdout(predicate::str::contains("suggested-matches"))
+        .stdout(predicate::str::contains("activity").not())
+        .stdout(predicate::str::contains("suggested-matches").not())
         .stdout(predicate::str::contains("reconciliation").not());
 }
 
 #[test]
 fn v1_payments_keep_requests_and_timeline_separate() {
     saturation()
-        .args(["v1", "payment-requests", "--help"])
+        .args(["payment-requests", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("get"));
 
     saturation()
-        .args(["v1", "payments", "--help"])
+        .args(["payments", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("list"))
@@ -154,44 +152,58 @@ fn v1_payments_keep_requests_and_timeline_separate() {
 #[test]
 fn v1_library_lists_all_sections() {
     saturation()
-        .args(["v1", "library", "--help"])
+        .args(["library", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("rates"))
+        .stdout(predicate::str::contains("rate-packs"))
         .stdout(predicate::str::contains("fringes"))
         .stdout(predicate::str::contains("globals"))
         .stdout(predicate::str::contains("currencies"))
+        .stdout(predicate::str::contains("fringe-groups"))
+        .stdout(predicate::str::contains("fringe-tags").not())
         .stdout(predicate::str::contains("tags"))
-        .stdout(predicate::str::contains("units"));
+        .stdout(predicate::str::contains("units"))
+        .stdout(predicate::str::contains("incentives"))
+        .stdout(predicate::str::contains("project"));
 }
 
 #[test]
-fn v1_documents_expose_drop_and_assign() {
+fn v1_documents_expose_link_tasks_without_a_links_collection() {
     saturation()
-        .args(["v1", "documents", "--help"])
+        .args(["documents", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("drop"))
-        .stdout(predicate::str::contains("assign"))
-        .stdout(predicate::str::contains("unassign"));
+        .stdout(predicate::str::contains("upload"))
+        .stdout(predicate::str::contains("  link "))
+        .stdout(predicate::str::contains("  unlink "))
+        .stdout(predicate::str::contains("  links ").not());
+
+    saturation()
+        .args(["documents", "link", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("transaction"))
+        .stdout(predicate::str::contains("contact"))
+        .stdout(predicate::str::contains("purchase-order"))
+        .stdout(predicate::str::contains("project"))
+        .stdout(predicate::str::contains("budget-line").not())
+        .stdout(predicate::str::contains("phase").not());
 }
 
 // ─── S14: CLI reaches the same /v1 surface as the SDK ─────────────────────────
 
 #[test]
-fn v1_purchase_orders_expose_items_and_reverse_reads() {
-    // PO line-item CRUD + reverse reads (transactions, documents) must be
-    // reachable, matching the SDK's `po.items(...)` / `po.transactions(...)`.
+fn v1_purchase_orders_expose_items_without_duplicate_reverse_reads() {
     saturation()
-        .args(["v1", "purchase-orders", "--help"])
+        .args(["purchase-orders", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("items"))
-        .stdout(predicate::str::contains("transactions"))
-        .stdout(predicate::str::contains("documents"));
+        .stdout(predicate::str::contains("  transactions ").not())
+        .stdout(predicate::str::contains("  documents ").not());
 
     saturation()
-        .args(["v1", "purchase-orders", "items", "--help"])
+        .args(["purchase-orders", "items", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("list"))
@@ -204,15 +216,15 @@ fn v1_purchase_orders_expose_items_and_reverse_reads() {
 // shape of the next-api contract (regressions if the CLI drifts back). ─────────
 
 #[test]
-fn v1_purchase_orders_expose_mark_paid_link_unlink() {
+fn v1_purchase_orders_expose_mark_paid_and_transaction_links() {
     // Product wording is the only public command and URL.
     saturation()
-        .args(["v1", "purchase-orders", "--help"])
+        .args(["purchase-orders", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("mark-paid"))
-        .stdout(predicate::str::contains("link"))
-        .stdout(predicate::str::contains("unlink"))
+        .stdout(predicate::str::contains("link-transaction"))
+        .stdout(predicate::str::contains("unlink-transaction"))
         .stdout(predicate::str::contains("finalize").not())
         .stdout(predicate::str::contains("lifecycle").not());
 }
@@ -221,7 +233,7 @@ fn v1_purchase_orders_expose_mark_paid_link_unlink() {
 fn v1_library_rates_expose_crud_lifecycle_and_items() {
     // Rate packs are pack-backed: CRUD + enable/disable + a per-pack items surface.
     saturation()
-        .args(["v1", "library", "rates", "--help"])
+        .args(["library", "rate-packs", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("create"))
@@ -234,10 +246,10 @@ fn v1_library_rates_expose_crud_lifecycle_and_items() {
 
 #[test]
 fn v1_library_templates_are_crud_not_lifecycle() {
-    // Fringes/globals/currencies/fringe-tags/tags are CRUD templates — they must
+    // Fringes, globals, currencies, fringe groups, and tags are CRUD templates.
     // NOT carry the pack enable/disable lifecycle (that was the pre-sync drift).
     let output = saturation()
-        .args(["v1", "library", "fringes", "--help"])
+        .args(["library", "fringes", "--help"])
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -252,12 +264,7 @@ fn v1_library_templates_are_crud_not_lifecycle() {
 #[test]
 fn v1_library_units_expose_custom_crud() {
     saturation()
-        .args(["v1", "library", "units", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("custom"));
-    saturation()
-        .args(["v1", "library", "units", "custom", "--help"])
+        .args(["library", "units", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("create"))
@@ -268,63 +275,55 @@ fn v1_library_units_expose_custom_crud() {
 #[test]
 fn v1_project_library_exposes_add_remove() {
     saturation()
-        .args(["v1", "project-library", "--help"])
+        .args(["library", "project", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("rates"))
+        .stdout(predicate::str::contains("rate-packs"))
         .stdout(predicate::str::contains("incentives"))
         .stdout(predicate::str::contains("fringes"))
         .stdout(predicate::str::contains("globals"))
         .stdout(predicate::str::contains("currencies"))
-        .stdout(predicate::str::contains("fringe-tags"))
+        .stdout(predicate::str::contains("fringe-groups"))
         .stdout(predicate::str::contains("tags"));
 
     // Project-resident rate packs are added / removed (copy-on-use), not
     // "installed/uninstalled" — both verbs map to `…/{packId}/add` (POST/DELETE).
     saturation()
-        .args(["v1", "project-library", "rates", "--help"])
+        .args(["library", "project", "rate-packs", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("add"))
         .stdout(predicate::str::contains("remove"));
 
     saturation()
-        .args(["v1", "project-library", "incentives", "--help"])
+        .args(["library", "project", "incentives", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("add"));
 }
 
 #[test]
-fn v1_views_expose_list_get_data() {
+fn projects_own_comments_and_views_are_not_public_tasks() {
     saturation()
-        .args(["v1", "views", "--help"])
+        .args(["projects", "comments", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("list"))
-        .stdout(predicate::str::contains("get"))
-        .stdout(predicate::str::contains("data"));
-}
+        .stdout(predicate::str::contains("create"))
+        .stdout(predicate::str::contains("update"))
+        .stdout(predicate::str::contains("delete"));
 
-#[test]
-fn v1_documents_expose_reverse_lookups() {
-    saturation()
-        .args(["v1", "documents", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("by-project"))
-        .stdout(predicate::str::contains("by-transaction"))
-        .stdout(predicate::str::contains("by-contact"));
+    saturation().args(["views", "--help"]).assert().failure();
 }
 
 // ─── Headless token injection (--token-file) + structured JSON errors ──────────
 
 #[test]
-fn v1_token_file_injects_token_and_emits_json_errors() {
+fn token_file_injects_token_and_emits_json_errors() {
     use std::io::Write;
 
-    // A token from a file is read per-invocation and injected as the bearer token,
-    // bypassing an interactive login (the desktop saturationV1 path).
+    // A token from a file is read per invocation and injected as the bearer token,
+    // bypassing an interactive login.
     let mut token = tempfile::NamedTempFile::new().unwrap();
     write!(token, "header.payload.signature").unwrap();
 
@@ -332,7 +331,7 @@ fn v1_token_file_injects_token_and_emits_json_errors() {
     // proving the token was injected (no "Not authenticated") AND that under the
     // default `--format json` the §5d error is emitted as clean JSON on stderr.
     let output = saturation()
-        .args(["v1", "me", "--token-file"])
+        .args(["whoami", "--token-file"])
         .arg(token.path())
         .args(["--api-base-url", "http://127.0.0.1:1"])
         .output()
@@ -355,42 +354,17 @@ fn v1_token_file_injects_token_and_emits_json_errors() {
     );
 }
 
-// ─── agent namespace: registry-driven discovery + dispatch ────────────────────
+// ─── schema: offline public API inventory ─────────────────────────────────────
 
 #[test]
-fn agent_help_is_registry_driven() {
-    saturation()
-        .args(["agent", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("tools"))
-        .stdout(predicate::str::contains("call"))
-        .stdout(predicate::str::contains("query"))
-        .stdout(predicate::str::contains("upload"))
-        .stdout(predicate::str::contains("exec").not());
-}
-
-#[test]
-fn agent_call_takes_tool_name_and_params() {
-    saturation()
-        .args(["agent", "call", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--params"))
-        .stdout(predicate::str::contains("--file"));
-}
-
-// ─── schema: two-sourced (OpenAPI /v1 + live agent registry) ──────────────────
-
-#[test]
-fn schema_v1_emits_offline_operation_inventory() {
+fn schema_emits_offline_operation_inventory() {
     // The /v1 surface is embedded from the OpenAPI at build time, so it works
     // with no auth and no network.
     saturation()
-        .args(["schema", "--v1"])
+        .arg("schema")
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"v1\""))
+        .stdout(predicate::str::contains("\"api\""))
         .stdout(predicate::str::contains("operationCount"))
         .stdout(predicate::str::contains("bundled OpenAPI 3.1"))
         // a known operation from the inventory
@@ -398,15 +372,13 @@ fn schema_v1_emits_offline_operation_inventory() {
 }
 
 #[test]
-fn schema_default_includes_v1_and_agent_keys() {
-    // Without auth, the agent half degrades to `{ unavailable: ... }` rather than
-    // crashing — both keys must still be present.
+fn schema_exposes_only_the_public_api_inventory() {
     saturation()
         .arg("schema")
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"v1\""))
-        .stdout(predicate::str::contains("\"agent\""));
+        .stdout(predicate::str::contains("\"api\""))
+        .stdout(predicate::str::contains("\"agent\"").not());
 }
 
 // ─── Global flags ─────────────────────────────────────────────────────────────
@@ -414,24 +386,14 @@ fn schema_default_includes_v1_and_agent_keys() {
 #[test]
 fn global_format_flag_accepts_json() {
     saturation()
-        .args(["--format", "json", "schema", "--v1"])
+        .args(["--format", "json", "schema"])
         .assert()
         .success();
 }
 
 #[test]
 fn global_quiet_flag() {
-    saturation()
-        .args(["--quiet", "schema", "--v1"])
-        .assert()
-        .success();
-}
-
-// ─── Auth status without config: must not crash ───────────────────────────────
-
-#[test]
-fn auth_status_no_config() {
-    saturation().args(["auth", "status"]).assert().success();
+    saturation().args(["--quiet", "schema"]).assert().success();
 }
 
 // ─── Error cases ──────────────────────────────────────────────────────────────

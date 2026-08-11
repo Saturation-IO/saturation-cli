@@ -96,8 +96,7 @@ impl Config {
         Ok(())
     }
 
-    /// Host for the public `/v1` API client. Falls back to the public API host
-    /// (`next-api.saturation.io`), not the internal one, when no override is set.
+    /// Default host for the public `/v1` API client.
     pub fn v1_server_url(&self) -> &str {
         DEFAULT_V1_SERVER
     }

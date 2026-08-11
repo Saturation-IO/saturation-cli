@@ -1,12 +1,12 @@
-//! clap definitions for the `sat /v1` namespace.
+//! clap definitions for Saturation's public resource commands.
 //!
 //! One subcommand per `/v1` resource group in the OpenAPI inventory. Filters,
 //! `expand` keys and `fields` selectors are expressible as flags (see
 //! [`ListFlags`]); every flag maps to a query parameter on the generated client
-//! — there are no hidden params and no hand-built JSON bodies (bodies are passed
+//! without hidden params or hand-built JSON bodies (bodies are passed
 //! as typed `--data` JSON or built from explicit flags).
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 /// Shared collection-read flags (pagination, expand, fields, sort, filters).
 /// Every field maps 1:1 to a documented `/v1` query parameter.
@@ -33,69 +33,47 @@ pub struct ListFlags {
     /// Include a total `count` in the response.
     #[arg(long)]
     pub with_count: bool,
-    /// Repeatable raw filter `key=value` for any documented query param not
-    /// surfaced as a dedicated flag (escape hatch with no hidden params).
-    #[arg(long = "filter", value_name = "KEY=VALUE")]
-    pub filters: Vec<String>,
 }
 
-#[derive(Args)]
-pub struct V1Args {
-    #[command(subcommand)]
-    pub command: V1Command,
-
-    /// Project slug or id (required by project-scoped resources).
-    #[arg(long, global = true)]
-    pub project: Option<String>,
-
-    /// Optional Idempotency-Key for unsafe creates (safe retries).
-    #[arg(long, global = true)]
-    pub idempotency_key: Option<String>,
+#[derive(Args, Clone, Debug, Default)]
+pub struct ConditionalListFlags {
+    #[command(flatten)]
+    pub flags: ListFlags,
+    /// Return 304 when the current budget projection has this ETag.
+    #[arg(long = "if-none-match")]
+    pub if_none_match: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum V1Command {
-    /// Identity bootstrap — `GET /me`.
-    Me,
-    /// Workspaces the token can act on.
-    Workspaces(SimpleList),
-    /// Projects (CRUD), addressable by slug or id.
-    Projects(ResourceArgs),
+    /// Show the identity and workspace bound to the current token.
+    Whoami,
+    /// Manage projects.
+    Projects(ProjectArgs),
     /// Workspace spaces (folders that group projects).
     Spaces(CrudArgs),
     /// Workspace contacts (vendors, crew, payees).
     Contacts(ResourceArgs),
-    /// Budget — document, totals, rollup, variance, cells, lines, phase data, phases, accounts.
+    /// Read and update budgets, lines, phases, and totals.
     Budget(BudgetArgs),
-    /// Transactions — unified ledger (source · type · status), items, batch, stats.
+    /// Manage transactions and their items.
     Transactions(TransactionArgs),
-    /// Purchase orders — read/write, Activity, Summary, Timeline, suggestions, and actions.
-    #[command(name = "purchase-orders", alias = "po")]
+    /// Manage purchase orders and their items.
+    #[command(name = "purchase-orders")]
     PurchaseOrders(PurchaseOrderArgs),
     /// Requests to pay a person or company.
     #[command(name = "payment-requests")]
     PaymentRequests(PaymentRequestArgs),
-    /// Payments from request through settlement, including Timeline.
+    /// Manage payments from request through settlement.
     Payments(PaymentArgs),
-    /// Library — workspace source scope (rates, fringes, globals, currencies, tags, units).
+    /// Manage workspace Library resources.
     Library(LibraryArgs),
-    /// Project-resident Library — copy-on-use installs/copies (`--project` required).
-    #[command(name = "project-library")]
-    ProjectLibrary(ProjectLibraryArgs),
-    /// Library incentives (enable-only packs + programs).
-    Incentives(IncentiveArgs),
-    /// Saved views — list / get / data (`--project` required).
-    Views(ViewArgs),
-    /// Documents — drop once, then assign to typed targets.
+    /// Upload, read, and link documents.
     Documents(DocumentArgs),
-    /// Spotlight search (workspace + project scope).
+    /// Search the workspace or one project.
     Search(SearchArgs),
-    /// Comments on workspace + project entities.
-    Comments(CrudArgs),
-    /// Outbound webhooks (subscriptions, ping, deliveries).
+    /// Manage webhooks and inspect deliveries.
     Webhooks(WebhookArgs),
-    /// Metered usage ledger, credits and operations.
-    Usage(UsageArgs),
 }
 
 // ── Generic resource (list/get/create/update/delete by id) ──────────────────
@@ -137,8 +115,40 @@ pub enum ResourceCommand {
     Delete { id: String },
 }
 
+#[derive(Args)]
+pub struct ProjectArgs {
+    #[command(subcommand)]
+    pub command: ProjectCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ProjectCommand {
+    /// List projects.
+    List(ListFlags),
+    /// Get one project by id or slug.
+    Get {
+        id: String,
+        #[command(flatten)]
+        flags: ListFlags,
+    },
+    /// Create a project from inline JSON.
+    Create { data: String },
+    /// Update a project from inline JSON.
+    Update { id: String, data: String },
+    /// Manage comments in one project.
+    Comments(ProjectCommentArgs),
+}
+
+#[derive(Args)]
+pub struct ProjectCommentArgs {
+    /// Project id or slug.
+    pub project_id: String,
+    #[command(subcommand)]
+    pub command: CrudCommand,
+}
+
 /// CRUD for a collection whose single-resource path exposes only
-/// create/update/delete (no `GET /{id}`) — spaces, comments, and line items.
+/// create/update/delete (no `GET /{id}`): spaces, comments, and line items.
 #[derive(Args)]
 pub struct CrudArgs {
     #[command(subcommand)]
@@ -174,31 +184,18 @@ pub struct BudgetArgs {
 
 #[derive(Subcommand)]
 pub enum BudgetCommand {
-    /// Budget document: lines, visible phases, totals, and editable phase data (`GET /budget`).
-    #[command(name = "document", alias = "doc")]
-    Document(BudgetDocumentFlags),
-    /// Rolled-up totals (`GET /budget/totals`).
-    Totals(ListFlags),
-    /// Account rollup (`GET /budget/rollup`).
-    Rollup(ListFlags),
-    /// Estimate-vs-actual variance (`GET /budget/variance`).
-    Variance(ListFlags),
-    /// Positional cell read (`GET /budget/cells?account=&column=`).
-    Cells {
-        #[arg(long)]
-        account: String,
-        #[arg(long)]
-        column: String,
-    },
+    /// Read the budget with its lines, phases, and totals.
+    Get(BudgetDocumentFlags),
+    /// Read totals by phase.
+    #[command(name = "phase-totals")]
+    PhaseTotals(ConditionalListFlags),
     /// Budget lines (list / get / create / update / delete).
     Lines(LineArgs),
-    /// Editable line phase data (single upsert / batch upsert).
+    /// Editable values for Budget Lines by Phase.
     #[command(name = "phase-data")]
     PhaseData(BudgetPhaseDataArgs),
     /// Budget phases (list / get / create / update / delete).
     Phases(ResourceCommandWrap),
-    /// Budget accounts.
-    Accounts(ListFlags),
 }
 
 #[derive(Args)]
@@ -209,9 +206,33 @@ pub struct BudgetDocumentFlags {
     /// Leaf account code naming one root line and its descendants.
     #[arg(long = "account-code")]
     pub account_code: Option<String>,
+    /// Account id naming one root line and its descendants.
+    #[arg(long)]
+    pub account_id: Option<String>,
     /// Visible phase id, alias, name, or type.
     #[arg(long)]
     pub phase: Option<String>,
+    /// Comma-separated tag ids.
+    #[arg(long)]
+    pub tags: Option<String>,
+    /// Match any or all supplied tags.
+    #[arg(long)]
+    pub tag_mode: Option<String>,
+    /// Earliest included date.
+    #[arg(long)]
+    pub date_from: Option<String>,
+    /// Latest included date.
+    #[arg(long)]
+    pub date_to: Option<String>,
+    /// Include hidden phases.
+    #[arg(long)]
+    pub include_hidden_phases: bool,
+    /// Comma-separated relations to inline.
+    #[arg(long)]
+    pub expand: Option<String>,
+    /// Return 304 when the current budget projection has this ETag.
+    #[arg(long = "if-none-match")]
+    pub if_none_match: Option<String>,
 }
 
 #[derive(Args)]
@@ -237,24 +258,24 @@ pub enum LineCommand {
         #[command(flatten)]
         flags: ListFlags,
     },
+    /// Get one budget line by id.
     Get {
         line_id: String,
         #[command(flatten)]
         flags: ListFlags,
     },
-    Create {
-        data: String,
-    },
-    #[command(name = "create-batch")]
-    CreateBatch {
-        data: String,
-    },
-    Update {
-        line_id: String,
-        data: String,
-    },
+    /// Create one budget line from inline JSON.
+    Create { data: String },
+    /// Create several budget lines in one request.
+    Bulk { data: String },
+    /// Update one budget line from inline JSON.
+    Update { line_id: String, data: String },
+    /// Delete one budget line.
     Delete {
         line_id: String,
+        /// Reset dependent line references while deleting.
+        #[arg(long)]
+        reset: bool,
     },
 }
 
@@ -266,14 +287,14 @@ pub struct BudgetPhaseDataArgs {
 
 #[derive(Subcommand)]
 pub enum BudgetPhaseDataCommand {
-    /// Upsert one editable phase-data entry for a line and phase.
-    Upsert {
+    /// Set one editable Phase value for a Budget Line.
+    Set {
         line_id: String,
         phase_id: String,
         data: String,
     },
-    /// Upsert many editable phase-data entries in one all-or-nothing batch.
-    Batch { data: String },
+    /// Set many Budget Line Phase values in one all-or-nothing request.
+    Bulk { data: String },
 }
 
 #[derive(Args)]
@@ -292,7 +313,7 @@ pub struct TransactionArgs {
 
 #[derive(Subcommand)]
 pub enum TransactionCommand {
-    /// List transactions (`source`/`type`/`status` filters; `source=journal` = legacy actuals).
+    /// List transactions with source, type, and status filters.
     List {
         #[arg(long)]
         source: Option<String>,
@@ -303,28 +324,23 @@ pub enum TransactionCommand {
         #[command(flatten)]
         flags: ListFlags,
     },
+    /// Get one transaction by id.
     Get {
         tx_id: String,
         #[command(flatten)]
         flags: ListFlags,
     },
-    Create {
-        data: String,
-    },
-    Update {
-        tx_id: String,
-        data: String,
-    },
-    Delete {
-        tx_id: String,
-    },
-    /// Aggregate stats (`GET /transactions/stats`).
+    /// Create one transaction from inline JSON.
+    Create { data: String },
+    /// Update one transaction from inline JSON.
+    Update { tx_id: String, data: String },
+    /// Delete one transaction.
+    Delete { tx_id: String },
+    /// Read transaction totals.
     Stats(ListFlags),
-    /// Distinct transaction types (`GET /transactions/types`).
-    Types,
-    /// Batch upsert (`POST /transactions/batch`) — replaces legacy `/actuals/batch`.
-    Batch {
-        /// Batch body as JSON array.
+    /// Create or update transactions in one request.
+    Bulk {
+        /// Bulk body as JSON array.
         data: String,
     },
     /// Line items on a transaction.
@@ -348,60 +364,52 @@ pub struct PurchaseOrderArgs {
 
 #[derive(Subcommand)]
 pub enum PurchaseOrderCommand {
+    /// List purchase orders.
     List(ListFlags),
+    /// Get one purchase order by id.
     Get {
         purchase_order_id: String,
         #[command(flatten)]
         flags: ListFlags,
     },
+    /// Create one purchase order from inline JSON.
     Create {
         data: String,
+        /// Comma-separated relations to inline in the response.
+        #[arg(long)]
+        expand: Option<String>,
     },
+    /// Update one purchase order from inline JSON.
     Update {
         purchase_order_id: String,
         data: String,
+        /// Comma-separated relations to inline in the response.
+        #[arg(long)]
+        expand: Option<String>,
     },
-    Delete {
-        purchase_order_id: String,
-    },
+    /// Delete one purchase order.
+    Delete { purchase_order_id: String },
     /// Submit a PO for approval.
-    Submit {
-        purchase_order_id: String,
-    },
+    Submit { purchase_order_id: String },
     /// Cancel an approval request.
     #[command(name = "cancel-submission")]
-    CancelSubmission {
-        purchase_order_id: String,
-    },
+    CancelSubmission { purchase_order_id: String },
     /// Void a PO.
-    Void {
-        purchase_order_id: String,
-    },
+    Void { purchase_order_id: String },
     /// Mark a PO as paid. Requires a linked transaction.
     #[command(name = "mark-paid")]
-    MarkPaid {
+    MarkPaid { purchase_order_id: String },
+    /// Link a transaction to the PO.
+    #[command(name = "link-transaction")]
+    LinkTransaction {
         purchase_order_id: String,
+        transaction_id: String,
     },
-    /// Link the PO to a target (`{...}` body required).
-    Link {
+    /// Unlink a transaction from the PO.
+    #[command(name = "unlink-transaction")]
+    UnlinkTransaction {
         purchase_order_id: String,
-        /// Link body as JSON.
-        data: String,
-    },
-    /// Unlink the PO from a target (`{...}` body required).
-    Unlink {
-        purchase_order_id: String,
-        /// Unlink body as JSON.
-        data: String,
-    },
-    /// Read current live conditions using the product Activity vocabulary.
-    Activity {
-        purchase_order_id: String,
-    },
-    /// List records that may belong to the PO but are not linked.
-    #[command(name = "suggested-matches")]
-    SuggestedMatches {
-        purchase_order_id: String,
+        transaction_id: String,
     },
     /// Read immutable purchase-order history.
     Timeline {
@@ -411,18 +419,6 @@ pub enum PurchaseOrderCommand {
     },
     /// Line items on a PO (list / create / update / delete).
     Items(PoItemArgs),
-    /// Transactions linked to a PO (reverse read).
-    Transactions {
-        purchase_order_id: String,
-        #[command(flatten)]
-        flags: ListFlags,
-    },
-    /// Documents assigned to a PO (reverse read).
-    Documents {
-        purchase_order_id: String,
-        #[command(flatten)]
-        flags: ListFlags,
-    },
 }
 
 // ── Payment requests and payments ───────────────────────────────────────────
@@ -435,7 +431,9 @@ pub struct PaymentRequestArgs {
 
 #[derive(Subcommand)]
 pub enum PaymentRequestCommand {
+    /// List payment requests.
     List(ListFlags),
+    /// Get one payment request by id.
     Get {
         payment_request_id: String,
         #[command(flatten)]
@@ -451,7 +449,9 @@ pub struct PaymentArgs {
 
 #[derive(Subcommand)]
 pub enum PaymentCommand {
+    /// List payments.
     List(ListFlags),
+    /// Get one payment by id.
     Get {
         payment_id: String,
         #[command(flatten)]
@@ -468,7 +468,7 @@ pub enum PaymentCommand {
 /// PO line-item CRUD, scoped to one purchase order.
 #[derive(Args)]
 pub struct PoItemArgs {
-    /// Purchase order id (`po_…`).
+    /// Purchase order id (`po_ID`).
     pub purchase_order_id: String,
     #[command(subcommand)]
     pub command: CrudCommand,
@@ -485,24 +485,29 @@ pub struct LibraryArgs {
 #[derive(Subcommand)]
 pub enum LibraryCommand {
     /// Rate packs (list / get / create / update / delete / enable / disable / items).
-    Rates(LibraryRatesArgs),
+    #[command(name = "rate-packs")]
+    RatePacks(LibraryRatesArgs),
     /// Fringe templates (CRUD).
     Fringes(LibraryCrudArgs),
     /// Global templates (CRUD).
     Globals(LibraryCrudArgs),
     /// Currency templates (CRUD).
     Currencies(LibraryCrudArgs),
-    /// Fringe-tag templates (CRUD).
-    #[command(name = "fringe-tags")]
-    FringeTags(LibraryCrudArgs),
+    /// Fringe groups (CRUD).
+    #[command(name = "fringe-groups")]
+    FringeGroups(LibraryCrudArgs),
     /// Tags (CRUD).
     Tags(LibraryCrudArgs),
-    /// Units — built-in read + custom-unit CRUD.
+    /// Manage units.
     Units(LibraryUnitsArgs),
+    /// Manage workspace incentive packs and programs.
+    Incentives(IncentiveArgs),
+    /// Manage Library resources copied into one project.
+    Project(ProjectLibraryArgs),
 }
 
 /// Workspace-Library CRUD shared by the template sections (fringes / globals /
-/// currencies / fringe-tags / tags). Single-resource ops are PATCH / DELETE; the
+/// currencies / fringe-groups / tags). Single-resource ops are PATCH / DELETE; the
 /// section root is list / create. No enable/disable (that is rate-packs only).
 #[derive(Args)]
 pub struct LibraryCrudArgs {
@@ -552,13 +557,13 @@ pub enum LibraryRatesCommand {
     Delete { id: String },
     /// Enable a pack for the workspace. Safe to repeat.
     Enable { id: String },
-    /// Disable a pack at the workspace (`DELETE …/enable`).
+    /// Disable a workspace rate pack.
     Disable { id: String },
     /// Rate-pack items (list / create / update / delete).
     Items(RatePackItemArgs),
 }
 
-/// Items within one rate pack (`/library/rates/{packId}/items`).
+/// Items within one rate pack.
 #[derive(Args)]
 pub struct RatePackItemArgs {
     /// Rate pack id.
@@ -575,16 +580,16 @@ pub struct LibraryUnitsArgs {
 
 #[derive(Subcommand)]
 pub enum LibraryUnitsCommand {
-    /// List units (built-in + custom) — `GET /library/units`.
+    /// List units.
     List(ListFlags),
-    /// Custom units (list / create / update / delete).
-    Custom(LibraryCustomUnitArgs),
-}
-
-#[derive(Args)]
-pub struct LibraryCustomUnitArgs {
-    #[command(subcommand)]
-    pub command: CrudCommand,
+    /// Get one unit.
+    Get { unit_id: String },
+    /// Create a unit.
+    Create { data: String },
+    /// Update a unit.
+    Update { unit_id: String, data: String },
+    /// Delete a unit.
+    Delete { unit_id: String },
 }
 
 // ── Project-resident Library ──────────────────────────────────────────────────
@@ -598,7 +603,8 @@ pub struct ProjectLibraryArgs {
 #[derive(Subcommand)]
 pub enum ProjectLibraryCommand {
     /// Project-resident rate packs (list / add / remove).
-    Rates(ProjectRateArgs),
+    #[command(name = "rate-packs")]
+    RatePacks(ProjectRateArgs),
     /// Project-resident incentives (list / get / add / update / delete).
     Incentives(ProjectIncentiveArgs),
     /// Project-resident fringe copies (list / get / add / update / delete).
@@ -607,9 +613,9 @@ pub enum ProjectLibraryCommand {
     Globals(ProjectCopyArgs),
     /// Project-resident currency copies (list / get / add / update / delete).
     Currencies(ProjectCopyArgs),
-    /// Project-resident fringe-tag copies (list / get / add / update / delete).
-    #[command(name = "fringe-tags")]
-    FringeTags(ProjectCopyArgs),
+    /// Project-resident Fringe Group copies (list / get / add / update / delete).
+    #[command(name = "fringe-groups")]
+    FringeGroups(ProjectCopyArgs),
     /// Project-associated tags (list / add / remove).
     Tags(ProjectTagArgs),
 }
@@ -624,9 +630,9 @@ pub struct ProjectRateArgs {
 pub enum ProjectRateCommand {
     /// List rate packs added to the project.
     List(ListFlags),
-    /// Add a workspace-enabled rate pack into the project (`POST …/{packId}/add`, idempotent).
+    /// Add a workspace-enabled rate pack to the project. Safe to repeat.
     Add { pack_id: String },
-    /// Remove a rate pack from the project (`DELETE …/{packId}/add`, idempotent).
+    /// Remove a rate pack from the project. Safe to repeat.
     Remove { pack_id: String },
 }
 
@@ -646,7 +652,7 @@ pub enum ProjectIncentiveCommand {
         #[command(flatten)]
         flags: ListFlags,
     },
-    /// Add an incentive program into the project from inline JSON (`{"programId":"…"}`).
+    /// Add an incentive program from inline JSON (`{"programId":"PROGRAM_ID"}`).
     Add { data: String },
     /// Patch a resident incentive by id.
     Update { incentive_id: String, data: String },
@@ -655,7 +661,7 @@ pub enum ProjectIncentiveCommand {
 }
 
 /// Shared CRUD for the copy-on-use sections (fringes / globals / currencies /
-/// fringe-tags). `add` copies a workspace source by `sourceId`.
+/// fringe-groups). `add` copies a workspace source by `sourceId`.
 #[derive(Args)]
 pub struct ProjectCopyArgs {
     #[command(subcommand)]
@@ -676,6 +682,9 @@ pub enum ProjectCopyCommand {
     Add {
         /// Workspace source id to copy.
         source_id: String,
+        /// Reset a diverged resident copy to the workspace source.
+        #[arg(long)]
+        reset: bool,
     },
     /// Patch a resident copy by id with inline JSON.
     Update { id: String, data: String },
@@ -693,44 +702,6 @@ pub struct ProjectTagArgs {
 pub enum ProjectTagCommand {
     /// List tags associated with the project.
     List(ListFlags),
-    /// Add a workspace tag to the project (`POST …/{tagId}/add`; optional inline
-    /// `{"tag":{"name":"…","color":"…"}}` to create it).
-    Add {
-        tag_id: String,
-        /// Optional add body as JSON.
-        data: Option<String>,
-    },
-    /// Remove a tag association from the project (`DELETE …/{tagId}/add`).
-    Remove { tag_id: String },
-}
-
-// ── Saved views ───────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-pub struct ViewArgs {
-    #[command(subcommand)]
-    pub command: ViewCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ViewCommand {
-    /// List the project's saved views.
-    List {
-        #[arg(long)]
-        subject_type: Option<String>,
-        #[arg(long)]
-        visibility: Option<String>,
-        #[command(flatten)]
-        flags: ListFlags,
-    },
-    /// Get one view's definition by id.
-    Get { view_id: String },
-    /// Resolve a view's rows (`expand` / `limit` / `cursor` layer on top).
-    Data {
-        view_id: String,
-        #[command(flatten)]
-        flags: ListFlags,
-    },
 }
 
 // ── Incentives ───────────────────────────────────────────────────────────────
@@ -781,68 +752,41 @@ pub enum DocumentCommand {
         #[command(flatten)]
         flags: ListFlags,
     },
-    /// Drop a file into the workspace (multipart upload).
-    Drop {
+    /// Upload a file into the workspace.
+    Upload {
         /// File path to upload.
         file: String,
-        /// Optional classification (invoice, receipt, screenplay, ...).
-        #[arg(long)]
-        classification: Option<String>,
         /// Optional override name.
         #[arg(long)]
         name: Option<String>,
+        /// Optional free-text description.
+        #[arg(long)]
+        description: Option<String>,
+        /// Folder id for the uploaded document.
+        #[arg(long)]
+        folder_id: Option<String>,
     },
     /// Patch document metadata.
     Update { document_id: String, data: String },
     /// Soft-delete a document.
     Delete { document_id: String },
-    /// Fetch compiled content.
+    /// Write the original document bytes to standard output.
     Content { document_id: String },
     /// Fetch structured extraction.
     Extraction { document_id: String },
-    /// Assign a document to a typed target (`{ kind, id }`).
-    Assign {
+    /// Link a document to a public resource.
+    Link {
         document_id: String,
-        /// Target kind (transaction | budgetLine | contact | purchaseOrder | project).
-        #[arg(long)]
-        kind: String,
-        /// Target id.
-        #[arg(long)]
-        id: String,
-        /// Replace an existing same-kind assignment to a different id (an explicit move)
-        /// instead of returning `409 already_assigned`.
+        kind: DocumentLinkKind,
+        target_id: String,
+        /// Replace a different Link of the same kind.
         #[arg(long)]
         replace: bool,
     },
-    /// Remove an assignment.
-    Unassign {
+    /// Remove one typed Link from a document.
+    Unlink {
         document_id: String,
-        #[arg(long)]
-        kind: String,
-        #[arg(long)]
-        id: String,
-    },
-    /// List a document's assignments.
-    Assignments { document_id: String },
-    /// Reverse read — documents on a project (`--project` required).
-    #[command(name = "by-project")]
-    ByProject {
-        #[command(flatten)]
-        flags: ListFlags,
-    },
-    /// Reverse read — documents on a transaction (`--project` required).
-    #[command(name = "by-transaction")]
-    ByTransaction {
-        tx_id: String,
-        #[command(flatten)]
-        flags: ListFlags,
-    },
-    /// Reverse read — documents on a contact (workspace scope).
-    #[command(name = "by-contact")]
-    ByContact {
-        contact_id: String,
-        #[command(flatten)]
-        flags: ListFlags,
+        kind: DocumentLinkKind,
     },
 }
 
@@ -869,27 +813,24 @@ pub struct WebhookArgs {
 
 #[derive(Subcommand)]
 pub enum WebhookCommand {
+    /// List webhook subscriptions.
     List(ListFlags),
+    /// Get one webhook subscription by id.
     Get {
         webhook_id: String,
         #[command(flatten)]
         flags: ListFlags,
     },
-    Create {
-        data: String,
-    },
-    Update {
-        webhook_id: String,
-        data: String,
-    },
-    Delete {
-        webhook_id: String,
-    },
+    /// Create a webhook subscription from inline JSON.
+    Create { data: String },
+    /// Update a webhook subscription from inline JSON.
+    Update { webhook_id: String, data: String },
+    /// Delete a webhook subscription.
+    Delete { webhook_id: String },
     /// Send a test event to the endpoint.
-    Ping {
-        webhook_id: String,
-    },
-    /// List recent delivery attempts.
+    #[command(name = "test-delivery")]
+    TestDelivery { webhook_id: String },
+    /// List recent delivery attempts for a webhook.
     Deliveries {
         webhook_id: String,
         #[command(flatten)]
@@ -897,20 +838,21 @@ pub enum WebhookCommand {
     },
 }
 
-// ── Usage ────────────────────────────────────────────────────────────────────
-
-#[derive(Args)]
-pub struct UsageArgs {
-    #[command(subcommand)]
-    pub command: UsageCommand,
+#[derive(Clone, ValueEnum)]
+pub enum DocumentLinkKind {
+    Transaction,
+    Contact,
+    PurchaseOrder,
+    Project,
 }
 
-#[derive(Subcommand)]
-pub enum UsageCommand {
-    /// Workspace usage ledger (`GET /usage`).
-    Summary(ListFlags),
-    /// Credit balance (`GET /usage/credits`).
-    Credits,
-    /// Metered operations (`GET /usage/operations`).
-    Operations(ListFlags),
+impl DocumentLinkKind {
+    pub fn api_name(&self) -> &'static str {
+        match self {
+            Self::Transaction => "transaction",
+            Self::Contact => "contact",
+            Self::PurchaseOrder => "purchaseOrder",
+            Self::Project => "project",
+        }
+    }
 }

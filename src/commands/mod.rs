@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::agent::client::AgentClient;
 use crate::cli::{Cli, Command};
 use crate::config::{Config, TokenInfo};
 use crate::output::Output;
@@ -18,11 +17,10 @@ pub async fn execute(cli: Cli) -> Result<()> {
         // ── Auth / schema: no live API client required ────────────────────────
         Command::Login(args) => auth::login(args, &output).await,
         Command::Logout => auth::logout(&output),
-        Command::Auth(args) => auth::execute(args, &output).await,
-        Command::Schema(args) => schema::execute(args, &output).await,
+        Command::Schema => schema::execute(&output),
 
-        // ── /v1 namespace: typed client generated from the OpenAPI ─────────────
-        Command::V1(args) => {
+        // ── Public API resources: typed client generated from OpenAPI ──────────
+        Command::Api(command) => {
             let mut config = load_config_with_overrides(cli.token_file.as_deref())?;
             // Transparently refresh an expired (refreshable) token before the call.
             auth::ensure_fresh_token(&mut config).await?;
@@ -32,16 +30,8 @@ pub async fn execute(cli: Cli) -> Result<()> {
                 .as_deref()
                 .unwrap_or(config.v1_server_url());
             let client = v1::Client::new(base_url, token.access_token.clone());
-            v1::commands::execute(*args, &client, &output).await
-        }
-
-        // ── agent namespace: registry-driven tool dispatch ─────────────────────
-        Command::Agent(args) => {
-            let mut config = load_config_with_overrides(cli.token_file.as_deref())?;
-            auth::ensure_fresh_token(&mut config).await?;
-            let workspace_override = args.workspace.clone();
-            let client = AgentClient::from_config(&config, workspace_override.as_deref())?;
-            crate::agent::execute(args, &client, &output).await
+            v1::commands::execute(*command, cli.project, cli.idempotency_key, &client, &output)
+                .await
         }
     }
 }
@@ -49,8 +39,7 @@ pub async fn execute(cli: Cli) -> Result<()> {
 /// Load config, then apply the `--token-file` injection.
 ///
 /// `--token-file` is the headless-auth path: read a bearer token from disk on
-/// every invocation (so a desktop-rotated short-TTL token stays fresh without a
-/// respawn), and store it as a non-refreshable `TokenInfo`.
+/// every invocation and store it as a non-refreshable `TokenInfo`.
 fn load_config_with_overrides(token_file: Option<&Path>) -> Result<Config> {
     let mut config = Config::load()?;
     if let Some(path) = token_file {

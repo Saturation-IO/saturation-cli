@@ -1,25 +1,14 @@
 //! Build script for the Saturation CLI.
 //!
-//! Two responsibilities, both keyed off the vendored OpenAPI 3.1 at
-//! `openapi/openapi.yaml` (a copy of `docs/next/next-api-build/openapi/openapi.yaml`,
-//! the single source of truth that also drives the TS SDK, the Scalar docs and
-//! the contract tests):
+//! Extract the public operation inventory from the OpenAPI 3.1 contract at
+//! `openapi/openapi.yaml`.
 //!
-//! 1. **`/v1` operation inventory** (active). Extract `{ path, method,
+//! Extract `{ path, method,
 //!    operationId, summary }` for every operation into `$OUT_DIR/v1_operations.json`,
 //!    which `src/schema.rs` embeds via `include_str!`. This keeps `sat schema`
 //!    in sync with the spec with zero hand-maintenance and no runtime YAML
 //!    dependency. The extraction is a deliberately small, dependency-free line
-//!    scanner — the document's own 2-space path indentation is the contract.
-//!
-//! 2. **progenitor codegen** (documented, opt-in). The chosen generator for the
-//!    typed `/v1` client is **progenitor** (pure-Rust, `reqwest`-native — no
-//!    JVM/codegen-server, matching the crate's existing `reqwest 0.12` stack).
-//!    Wiring it as a hard `build-dependency` pulls a large transitive tree
-//!    (`typify`, `openapiv3`, `schemars`, a vendored `rustfmt`) and a multi-minute
-//!    first build, so the committed `src/v1/generated.rs` provides a
-//!    deterministic, offline client today. To regenerate against an updated spec,
-//!    enable the documented step below (see README "Regenerating the client").
+//!    scanner. The document's 2-space path indentation is the contract.
 
 use std::path::PathBuf;
 
@@ -38,23 +27,6 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     std::fs::write(out_dir.join("v1_operations.json"), json)
         .expect("failed to write v1_operations.json");
-
-    // ── progenitor codegen (opt-in via the `progenitor-gen` feature) ──────────
-    //
-    // Uncomment the build-dependency in Cargo.toml and the block below to run
-    // progenitor at build time. It writes a generated client to
-    // `$OUT_DIR/v1_client.rs`, which `src/v1/generated.rs` can then `include!`.
-    //
-    //   #[cfg(feature = "progenitor-gen")]
-    //   {
-    //       let raw = std::fs::read_to_string(&spec_path).unwrap();
-    //       let spec: openapiv3::OpenAPI = serde_yaml::from_str(&raw).unwrap();
-    //       let mut gen = progenitor::Generator::default();
-    //       let tokens = gen.generate_tokens(&spec).unwrap();
-    //       let ast = syn::parse2(tokens).unwrap();
-    //       let content = prettyplease::unparse(&ast);
-    //       std::fs::write(out_dir.join("v1_client.rs"), content).unwrap();
-    //   }
 }
 
 #[derive(Clone)]

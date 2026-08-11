@@ -23,11 +23,11 @@ cargo publish --locked --dry-run
 Keep changes focused. Add a regression test when fixing a bug, and update the
 README when a command or installation method changes.
 
-## OpenAPI client
+## OpenAPI contract
 
-The repository includes a vendored OpenAPI specification at
-`openapi/openapi.yaml`. The generated client at `src/v1/generated.rs` must be
-updated in the same pull request when that specification changes.
+The repository commits a Rust transport and an audited OpenAPI snapshot at
+`openapi/openapi.yaml`. Update the transport, snapshot, and operation-parity test
+in the same pull request when the public contract changes.
 
 ## Security
 

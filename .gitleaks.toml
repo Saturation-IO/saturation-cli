@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known synthetic values in historical tests and OpenAPI examples"
+regexTarget = "secret"
+regexes = [
+  '''^itg-po-key-0123456789$''',
+  '''^itg-po-key-9876543210$''',
+  '''^whsec_3f9b2a7c8d4e1a05$''',
+]
