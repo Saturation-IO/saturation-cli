@@ -115,8 +115,8 @@ Run `saturation --help` to see the full command tree. Run any command with
 | `saturation schema` | Print the machine-readable public API inventory |
 
 The repository commits its Rust transport and an audited snapshot of the public
-OpenAPI contract. The snapshot contains 157 operations, and `saturation schema`
-reads it directly. CI executes 157 CLI tasks against a local recorder and maps
+OpenAPI contract. The snapshot contains 154 operations, and `saturation schema`
+reads it directly. CI executes 154 CLI tasks against a local recorder and maps
 each request to one OpenAPI operation. Every public operation has one CLI task.
 
 The [API documentation](https://docs.saturation.io) uses the same public contract.

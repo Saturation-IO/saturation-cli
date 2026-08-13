@@ -602,9 +602,6 @@ pub struct ProjectLibraryArgs {
 
 #[derive(Subcommand)]
 pub enum ProjectLibraryCommand {
-    /// Project-resident rate packs (list / add / remove).
-    #[command(name = "rate-packs")]
-    RatePacks(ProjectRateArgs),
     /// Project-resident incentives (list / get / add / update / delete).
     Incentives(ProjectIncentiveArgs),
     /// Project-resident fringe copies (list / get / add / update / delete).
@@ -618,22 +615,6 @@ pub enum ProjectLibraryCommand {
     FringeGroups(ProjectCopyArgs),
     /// Project-associated tags (list / add / remove).
     Tags(ProjectTagArgs),
-}
-
-#[derive(Args)]
-pub struct ProjectRateArgs {
-    #[command(subcommand)]
-    pub command: ProjectRateCommand,
-}
-
-#[derive(Subcommand)]
-pub enum ProjectRateCommand {
-    /// List rate packs added to the project.
-    List(ListFlags),
-    /// Add a workspace-enabled rate pack to the project. Safe to repeat.
-    Add { pack_id: String },
-    /// Remove a rate pack from the project. Safe to repeat.
-    Remove { pack_id: String },
 }
 
 #[derive(Args)]

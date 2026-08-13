@@ -1016,26 +1016,6 @@ async fn project_library(
     project: &str,
 ) -> Result<()> {
     match cmd {
-        ProjectLibraryCommand::RatePacks(a) => {
-            let base = |s: &str| client.project_path(project, &format!("library/rate-packs/{s}"));
-            match a.command {
-                ProjectRateCommand::List(f) => render(
-                    client
-                        .get(
-                            &client.project_path(project, "library/rate-packs"),
-                            &build_query(&f, vec![]),
-                        )
-                        .await,
-                    output,
-                ),
-                ProjectRateCommand::Add { pack_id } => {
-                    render(client.put(&base(&pack_id), &Value::Null).await, output)
-                }
-                ProjectRateCommand::Remove { pack_id } => {
-                    render(client.delete(&base(&pack_id)).await, output)
-                }
-            }
-        }
         ProjectLibraryCommand::Incentives(a) => {
             let coll = client.project_path(project, "library/incentives");
             match a.command {
