@@ -3278,103 +3278,6 @@ paths:
           $ref: '#/components/responses/Error404'
         '429':
           $ref: '#/components/responses/Error429'
-  /projects/{projectId}/library/rate-packs:
-    get:
-      operationId: library_listProjectRatePacks
-      summary: List project rate packs
-      tags:
-      - Library
-      parameters:
-      - $ref: '#/components/parameters/projectId'
-      - $ref: '#/components/parameters/limit'
-      - $ref: '#/components/parameters/cursor'
-      responses:
-        '200':
-          description: A page of installed rate packs.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProjectRatePackCollection'
-              example:
-                data:
-                - id: prp_1
-                  ratePackId: rpk_2a9f
-                  installedAt: '2026-05-01T08:00:00Z'
-        '400':
-          $ref: '#/components/responses/Error400'
-        '401':
-          $ref: '#/components/responses/Error401'
-        '402':
-          $ref: '#/components/responses/Error402'
-        '403':
-          $ref: '#/components/responses/Error403'
-        '404':
-          $ref: '#/components/responses/Error404'
-        '429':
-          $ref: '#/components/responses/Error429'
-  /projects/{projectId}/library/rate-packs/{packId}:
-    put:
-      operationId: library_addRatePack
-      summary: Add a rate pack to a project
-      description: Add an enabled rate pack to a project. Disabled or deprecated packs return `400 validation`.
-      tags:
-      - Library
-      parameters:
-      - $ref: '#/components/parameters/projectId'
-      - name: packId
-        in: path
-        required: true
-        schema:
-          $ref: '#/components/schemas/Id'
-      responses:
-        '200':
-          description: The rate pack added to the project.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ProjectRatePack'
-              example:
-                id: prp_1
-                ratePackId: rpk_2a9f
-                installedAt: '2026-05-28T10:00:00Z'
-        '400':
-          $ref: '#/components/responses/Error400'
-        '401':
-          $ref: '#/components/responses/Error401'
-        '402':
-          $ref: '#/components/responses/Error402'
-        '403':
-          $ref: '#/components/responses/Error403'
-        '404':
-          $ref: '#/components/responses/Error404'
-        '429':
-          $ref: '#/components/responses/Error429'
-    delete:
-      operationId: library_removeRatePack
-      summary: Remove a rate pack from the project
-      description: Remove a rate pack from a project. Repeating the request has no additional effect.
-      tags:
-      - Library
-      parameters:
-      - $ref: '#/components/parameters/projectId'
-      - name: packId
-        in: path
-        required: true
-        schema:
-          $ref: '#/components/schemas/Id'
-      responses:
-        '204':
-          description: Removed.
-        '401':
-          $ref: '#/components/responses/Error401'
-        '402':
-          $ref: '#/components/responses/Error402'
-        '403':
-          $ref: '#/components/responses/Error403'
-        '404':
-          $ref: '#/components/responses/Error404'
-        '429':
-          $ref: '#/components/responses/Error429'
   /projects/{projectId}/library/incentives:
     get:
       operationId: library_listProjectIncentives
@@ -9434,34 +9337,6 @@ components:
           type: array
           items:
             type: string
-    ProjectRatePack:
-      type: object
-      description: A rate pack added to a project.
-      additionalProperties: false
-      required:
-      - id
-      - ratePackId
-      - installedAt
-      properties:
-        id:
-          $ref: '#/components/schemas/Id'
-        ratePackId:
-          $ref: '#/components/schemas/Id'
-        installedAt:
-          type: string
-          format: date-time
-        installedBy:
-          anyOf:
-          - allOf:
-            - $ref: '#/components/schemas/Id'
-          - type: 'null'
-        deprecated:
-          type: boolean
-        installedPack:
-          description: Rate pack details. Included with `expand=installedPack`.
-          oneOf:
-          - $ref: '#/components/schemas/RatePack'
-          - $ref: '#/components/schemas/SourceTombstone'
     IncentivePack:
       type: object
       description: A collection of incentive programs available to the workspace.
@@ -10351,24 +10226,6 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/IncentiveProgram'
-        nextCursor:
-          $ref: '#/components/schemas/NextCursor'
-        count:
-          type: integer
-          description: Total matching items; present only when `withCount=true` was requested.
-        truncated:
-          type: boolean
-          description: Whether some matching items were omitted from the response.
-    ProjectRatePackCollection:
-      type: object
-      additionalProperties: false
-      required:
-      - data
-      properties:
-        data:
-          type: array
-          items:
-            $ref: '#/components/schemas/ProjectRatePack'
         nextCursor:
           $ref: '#/components/schemas/NextCursor'
         count:

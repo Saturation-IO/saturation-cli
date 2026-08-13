@@ -146,7 +146,7 @@ async fn exact_cli_operation_parity_matches_openapi_contract() {
     let operations = schema["api"]["operations"]
         .as_array()
         .expect("operation inventory");
-    assert_eq!(operations.len(), 157, "OpenAPI operation count changed");
+    assert_eq!(operations.len(), 154, "OpenAPI operation count changed");
     assert!(
         operations.iter().all(|operation| !operation["path"]
             .as_str()
@@ -162,7 +162,7 @@ async fn exact_cli_operation_parity_matches_openapi_contract() {
     for root in api_roots {
         collect_leaves(vec![root], &mut leaves);
     }
-    assert_eq!(leaves.len(), 157, "root API leaf count changed");
+    assert_eq!(leaves.len(), 154, "root API leaf count changed");
 
     let variants = leaves
         .iter()
@@ -174,7 +174,7 @@ async fn exact_cli_operation_parity_matches_openapi_contract() {
             (leaf.clone(), project)
         })
         .collect::<Vec<_>>();
-    assert_eq!(variants.len(), 157);
+    assert_eq!(variants.len(), 154);
 
     let server = MockServer::start().await;
     Mock::given(any())
@@ -214,7 +214,7 @@ async fn exact_cli_operation_parity_matches_openapi_contract() {
     }
 
     let requests = server.received_requests().await.expect("recorded requests");
-    assert_eq!(requests.len(), 157);
+    assert_eq!(requests.len(), 154);
     let mut reached = HashSet::new();
     for ((leaf, project), request) in variants.iter().zip(&requests) {
         let concrete = request.url.path().trim_start_matches("/v1");
@@ -265,7 +265,7 @@ async fn exact_cli_operation_parity_matches_openapi_contract() {
     }
     assert_eq!(
         reached.len(),
-        157,
+        154,
         "two CLI variants reached the same operation"
     );
 

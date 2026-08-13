@@ -278,22 +278,13 @@ fn v1_project_library_exposes_add_remove() {
         .args(["library", "project", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("rate-packs"))
+        .stdout(predicate::str::contains("rate-packs").not())
         .stdout(predicate::str::contains("incentives"))
         .stdout(predicate::str::contains("fringes"))
         .stdout(predicate::str::contains("globals"))
         .stdout(predicate::str::contains("currencies"))
         .stdout(predicate::str::contains("fringe-groups"))
         .stdout(predicate::str::contains("tags"));
-
-    // Project-resident rate packs are added / removed (copy-on-use), not
-    // "installed/uninstalled" — both verbs map to `…/{packId}/add` (POST/DELETE).
-    saturation()
-        .args(["library", "project", "rate-packs", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("add"))
-        .stdout(predicate::str::contains("remove"));
 
     saturation()
         .args(["library", "project", "incentives", "--help"])
